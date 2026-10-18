@@ -1,0 +1,15 @@
+[
+    {
+        "stepTitle": "安装说明",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<b>Hermes Agent</b><br>开源 AI Agent，支持多平台消息网关、内置学习循环、技能系统和 MCP 扩展。"
+            },
+            {
+                "type": "tips",
+                "helpText": "安装完成后桌面会出现两个入口：<br>① <b>Hermes 工作台</b> — 日常对话与工作区（官方 Desktop 界面）<br>② <b>Hermes Admin</b> — 模型 / 通讯 / 定时任务 / 日志 / 工作区管理面板<br>从「Hermes 工作台」或「Hermes Admin」完成模型添加即可开始对话。"
+            }
+        ]
+    }
+]

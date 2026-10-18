@@ -1,0 +1,32 @@
+{
+    ".url": {
+        "hermes-agent.admin.Application": {
+            "title": "Hermes Admin",
+            "icon": "images/{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "gatewaySocket": "hermes-agent.sock",
+            "gatewayPrefix": "/app/hermes-agent",
+            "port": "",
+            "url": "/app/hermes-agent/admin/",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        },
+        "hermes-agent.desk.Application": {
+            "title": "Hermes 工作台",
+            "icon": "images/{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "gatewaySocket": "hermes-agent.sock",
+            "gatewayPrefix": "/app/hermes-agent",
+            "port": "",
+            "url": "/app/hermes-agent/admin/web/",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        }
+    }
+}

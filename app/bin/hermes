@@ -1,0 +1,25 @@
+#!/bin/bash
+set -e
+
+HERMES_VENV_BIN="${TRIM_PKGHOME:-/var/apps/hermes-agent/home}/data/venv/bin/hermes"
+
+if [ ! -x "$HERMES_VENV_BIN" ]; then
+    echo "hermes-agent not installed in venv. Please reinstall the app." >&2
+    exit 1
+fi
+
+export PATH="${TRIM_PKGHOME:-/var/apps/hermes-agent/home}/data/venv/bin:/var/apps/nodejs_v24/target/bin:$PATH"
+export HOME="${TRIM_PKGHOME:-/var/apps/hermes-agent/home}/data"
+export HERMES_HOME="${HOME}"
+HERMES_PACKAGED_SRC="${TRIM_APPDEST:-/var/apps/hermes-agent/target}/hermes-src"
+if [ -f "${HERMES_PACKAGED_SRC}/ui-tui/dist/entry.js" ]; then
+    export HERMES_TUI_DIR="${HERMES_TUI_DIR:-${HERMES_PACKAGED_SRC}/ui-tui}"
+fi
+if [ -f "${HERMES_PACKAGED_SRC}/hermes_cli/web_dist/index.html" ]; then
+    export HERMES_WEB_DIST="${HERMES_WEB_DIST:-${HERMES_PACKAGED_SRC}/hermes_cli/web_dist}"
+fi
+if [ -z "${HERMES_NODE:-}" ] && command -v node >/dev/null 2>&1; then
+    export HERMES_NODE="$(command -v node)"
+fi
+
+exec "$HERMES_VENV_BIN" "$@"

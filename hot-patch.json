@@ -1,0 +1,10 @@
+{
+  "version": "0.21.50",
+  "base_version": "0.21.49",
+  "description": "v0.21.50：聊天窗口防卡 DOM 治理 + 麦克风语音输入可用性修复。①condenseChatBody 消息折叠：超过 60 条 .msg 时自动把最早的多余消息折叠为内存 HTML（不丢数据），显示「↕ 查看更早的 N 条消息」折叠条，点击展开（60 秒防抖窗口）；覆盖 6 个追加/渲染调用点（加载会话、普通发送、圆桌发言、主持人总结等），长会话/圆桌 20 轮不再无限累积 DOM 导致浏览器冻结。②麦克风修复：浏览器安全限制下 HTTP 页面（navigator.mediaDevices 为 undefined）无法调用 getUserMedia，startVoiceRecord 增加 isSecureContext 前置检查，非 HTTPS 直接 toast 提示改用 https://IP:5667（自签名证书首次需「继续访问」信任）——浏览器与手机语音输入在 HTTPS 入口下均可正常使用。仅 ui/index.html，热更新生效，无需重启。",
+  "files": [
+    {
+      "path": "ui/index.html"
+    }
+  ]
+}
