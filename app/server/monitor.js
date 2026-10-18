@@ -2,7 +2,7 @@
 import { spawn, spawnSync, execSync, execFile } from "child_process";
 import { createRequire } from "module";
 import { Readable } from "stream";
-import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, symlinkSync, watch, chmodSync, chownSync, readdirSync, createReadStream, openSync, readSync, closeSync, rmSync, copyFileSync, appendFileSync } from "fs";
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, symlinkSync, watch, chmodSync, chownSync, readdirSync, createReadStream, openSync, readSync, closeSync, rmSync, copyFileSync, cpSync, appendFileSync } from "fs";
 import { randomBytes } from "crypto";
 import { networkInterfaces } from "os";
 import { resolve as resolvePath, dirname, join } from "path";
@@ -3579,6 +3579,52 @@ let lastGatewayRestartTs = 0;
 let restartFirstSeen = { pid: 0, ts: 0 };
 // Dashboard 自愈冷却：避免并发请求在 Dashboard 挂死时反复杀进程+重启（10 秒内最多自愈一次）
 let lastDashboardHealTs = 0;
+// Dashboard 冷启动宽限期：spawn 后这段时间内「进程存活 + 端口未监听」是正常冷启动
+// （生产 ARM 冷启动 ~47s：55 插件发现 + web_server mount + config-repair 备份），
+// 不可判挂死杀掉，否则自愈循环反复杀正在启动的 dashboard，造成「安装后陷入重复启动」。
+const DASHBOARD_COLD_START_GRACE_MS = Number(process.env.DASHBOARD_COLD_START_GRACE_MS || 120000);
+// 自愈分支等待 dashboard 就绪的上限（超过仍未起则回 502，下次请求继续等，不杀冷启动中的进程）
+const DASHBOARD_READY_WAIT_MS = Number(process.env.DASHBOARD_READY_WAIT_MS || 60000);
+// 冷启动期本次请求最多替前端「等就绪」的时间（避免单个 HTTP 请求长时间悬挂；未等到则回 502 starting，前端下轮自动重试）
+const DASHBOARD_STARTING_WAIT_MS = Number(process.env.DASHBOARD_STARTING_WAIT_MS || 15000);
+
+// 取当前 dashboard 进程的 spawn 时刻：优先内存 spawnTimes，monitor 重启后内存丢失时
+// 回退 pid 文件 mtime（spawnHermes 的 writeFileSync 与 1500ms pid 校正都会刷新 mtime）。
+function dashboardSpawnTs() {
+  const mem = spawnTimes.get(PID_DASHBOARD);
+  if (mem) return mem;
+  try { return statSync(PID_DASHBOARD).mtimeMs; } catch { return 0; }
+}
+
+// 轮询等待 dashboard 端口就绪（ms 内成功返回 true），用与旧逻辑一致的 fetch 探活（status<500 视为 ready）。
+async function waitDashboardReady(ms) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 300));
+    try {
+      const probe = await fetch(`http://${DASHBOARD_BIND}:${DASHBOARD_PORT}/`, { signal: AbortSignal.timeout(300) });
+      if (probe.ok || probe.status < 500) return true;
+    } catch {}
+  }
+  try {
+    const probe = await fetch(`http://${DASHBOARD_BIND}:${DASHBOARD_PORT}/`, { signal: AbortSignal.timeout(300) });
+    return probe.ok || probe.status < 500;
+  } catch { return false; }
+}
+
+// 重试原请求（注入 dashboard 会话令牌、剔除 host、限制 10s）。
+async function retryOriginalDashboard(req, target) {
+  const headers2 = new Headers(req.headers);
+  headers2.delete("host");
+  headers2.set("X-Hermes-Session-Token", DASHBOARD_SESSION_TOKEN);
+  const init2 = { method: req.method, headers: headers2, signal: AbortSignal.timeout(10000) };
+  if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
+    init2.body = req.body;
+    init2.duplex = "half";
+  }
+  const upstream2 = await fetch(target, init2);
+  return new Response(upstream2.body, { status: upstream2.status, headers: upstream2.headers });
+}
 
 async function proxyDashboard(req) {
   const url     = new URL(req.url);
@@ -4127,9 +4173,27 @@ async function proxyDashboard(req) {
       if (!portUp && healAllowed) {
         lastDashboardHealTs = Date.now();
         const dp = readRawPid(PID_DASHBOARD);
-        // 进程仍在（挂死/zombie）但端口未监听：先杀掉并清理 pid 文件，否则 spawnHermes 会判定 already_running
-        if (dp && pidAlive(dp)) {
-          log(`[proxyDashboard] Dashboard 进程 pid=${dp} 存活但端口 ${DASHBOARD_PORT} 未监听（挂死），杀掉后重启…`);
+        const dbAlive = dp && pidAlive(dp);
+        // 冷启动宽限：进程是最近 spawn 的且仍在宽限期内（生产 ARM 冷启动 ~47s，宽限 120s 覆盖）
+        // → 判为「正在启动」，绝不杀掉，否则反复杀正在冷启动的 dashboard 造成「安装后陷入重复启动」。
+        const inGrace = dbAlive && (Date.now() - dashboardSpawnTs()) < DASHBOARD_COLD_START_GRACE_MS;
+
+        if (inGrace) {
+          log(`[proxyDashboard] Dashboard 正在冷启动（pid=${dp}，spawn ${Math.round((Date.now() - dashboardSpawnTs()) / 1000)}s），宽限期内不重启，等待就绪…`);
+          const ready = await waitDashboardReady(DASHBOARD_STARTING_WAIT_MS);
+          if (ready) {
+            try { return await retryOriginalDashboard(req, target); } catch {}
+          }
+          // 本次未等到就绪：回 502 starting，前端下轮请求再次进入宽限期等待（直到冷启动完成），不杀、不重启
+          return new Response(JSON.stringify({
+            error: "Dashboard unavailable",
+            dashboard: { state: "starting", port: DASHBOARD_PORT, hint: "工作服务正在启动中，请稍候后重试" },
+          }), { status: 502, headers: { "Content-Type": "application/json" } });
+        }
+
+        // 真挂死（存活但超宽限期仍不监听）：杀掉并清理 pid，否则 spawnHermes 会判 already_running
+        if (dbAlive) {
+          log(`[proxyDashboard] Dashboard 进程 pid=${dp} 存活但端口 ${DASHBOARD_PORT} 未监听（超冷启动宽限期，判定挂死），杀掉后重启…`);
           try { process.kill(dp, "SIGTERM"); } catch {}
           const killDeadline = Date.now() + 2500;
           while (pidAlive(dp) && Date.now() < killDeadline) await new Promise(r => setTimeout(r, 100));
@@ -4139,30 +4203,16 @@ async function proxyDashboard(req) {
           log(`[proxyDashboard] Dashboard 无响应且未运行，尝试自动拉起…`);
           try { unlinkSync(PID_DASHBOARD); } catch {}
         }
+        // 新 spawn 后等待就绪（上限 DASHBOARD_READY_WAIT_MS，冷启动最坏 ~47s 被覆盖）再重试
         try {
           spawnHermes("dashboard", PID_DASHBOARD, ["dashboard", "--host", DASHBOARD_BIND, "--port", String(DASHBOARD_PORT), "--no-open", "--skip-build", "--insecure"]);
-          // 等待 dashboard ready（最多 5 秒）
-          const deadline = Date.now() + 5000;
-          while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 250));
-            try {
-              const probe = await fetch(`http://${DASHBOARD_BIND}:${DASHBOARD_PORT}/`, { signal: AbortSignal.timeout(300) });
-              if (probe.ok || probe.status < 500) break;
-            } catch {}
+          const ready = await waitDashboardReady(DASHBOARD_READY_WAIT_MS);
+          if (ready) {
+            try { return await retryOriginalDashboard(req, target); } catch {}
           }
-          // 重试原请求
-          const headers2 = new Headers(req.headers);
-          headers2.delete("host");
-          headers2.set("X-Hermes-Session-Token", DASHBOARD_SESSION_TOKEN);
-          const init2 = { method: req.method, headers: headers2, signal: AbortSignal.timeout(10000) };
-          if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
-            init2.body = req.body;
-            init2.duplex = "half";
-          }
-          const upstream2 = await fetch(target, init2);
-          return new Response(upstream2.body, { status: upstream2.status, headers: upstream2.headers });
+          // 未就绪则落到下方 502 诊断响应
         } catch (e2) {
-          log(`[proxyDashboard] 自动拉起 Dashboard 后重试失败：${e2?.message || e2}`);
+          log(`[proxyDashboard] 自动拉起 Dashboard 失败：${e2?.message || e2}`);
         }
       }
     }

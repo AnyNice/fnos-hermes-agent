@@ -273,6 +273,22 @@ if [ -d "${PROMPTS_SRC}" ]; then
         log_msg "config.yaml deployed (missing)"
     fi
 
+    # config.yaml 版本戳 — 幂等补 _config_version：无此字段时 hermes 核心 post_update
+    # 把"无版本戳"当 ver 0，误判低于 support floor(v12) 而跳过迁移并报 WARNING
+    # （"config migration skipped: predates version 12" 即此因）。
+    # 新装模板已带最新戳；存量升级时 config.yaml 已存在不会重拷，此处动态取核心声明值补戳兜底。
+    if [ -f "${DATA_DIR}/config.yaml" ] && ! grep -qE '^_config_version:' "${DATA_DIR}/config.yaml"; then
+        _LATEST=$(grep -oE '"_config_version": *[0-9]+' "${HERMES_SRC}/hermes_cli/config_defaults.py" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        if [ -n "${_LATEST}" ]; then
+            # 追加前保证文件以换行结尾（末尾无换行时 echo >> 会把戳粘到最后一行上，破坏 YAML）
+            [ -n "$(tail -c 1 "${DATA_DIR}/config.yaml")" ] && printf '\n' >> "${DATA_DIR}/config.yaml"
+            echo "_config_version: ${_LATEST}" >> "${DATA_DIR}/config.yaml"
+            log_msg "config.yaml 已幂等补 _config_version: ${_LATEST}（防核心跳过迁移）"
+        else
+            log_msg "WARNING: 未能从 config_defaults.py 解析 _config_version，跳过补戳"
+        fi
+    fi
+
     # 工作台（work-ui）中文默认 — 幂等补写：运行时 config 的 display.language
     # 从 en 替换为 zh（已是 zh/其他值时不匹配即跳过，不影响用户手动改过的配置）。
     if [ -f "${DATA_DIR}/config.yaml" ] && grep -q "^  language: en$" "${DATA_DIR}/config.yaml"; then
