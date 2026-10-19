@@ -389,7 +389,14 @@ test('GitHub PAT: save/clear 0600 落盘 + check 带 Authorization + releases fa
     assert.equal(body.github.hasPat, false);
     assert.equal(body.github.source, 'none');
     assert.equal(body.app.latest, '0.19.0');
-    assert.equal(typeof body.app.updateAvailable, 'boolean'); // 取决于 version.json 的 appVersion，此处不断言具体值
+    // 回归捕获：app.current 必须走 FPK 版本轨（= 仓库 manifest 版本号），
+    // 而非核心版本轨（hermesVersion）或 'unknown'。修前 current=appVersion，
+    // 会与 GitHub tag 跨轨混比 → updateAvailable 失真。
+    const manifestNow = readFileSync(path.join(repoRoot, 'manifest'), 'utf8').match(/^version\s*=\s*([\d.]+)/m)?.[1];
+    assert.ok(manifestNow, '测试前提：仓库 manifest 应有版本号');
+    assert.equal(body.app.current, manifestNow, 'app.current 应取 manifest FPK 版本轨');
+    // mock latest(0.19.0) < 任何真实 FPK 版号 → 同轨比较后应为 false
+    assert.equal(body.app.updateAvailable, false, 'FPK 轨可比后：旧 latest 不应判为可更新');
     assert.match(body.app.body, /双入口/);
     assert.match(body.app.downloadUrl, /hermes-agent_0\.19\.0\.fpk/);
     assert.equal(body.app.error, undefined);

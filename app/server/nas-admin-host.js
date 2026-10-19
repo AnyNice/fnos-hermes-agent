@@ -252,6 +252,10 @@ export function createNasAdminHost(options = {}) {
       builtAt: stamp.builtAt || null,
       commitDate: stamp.commitDate || null,
       appVersion: hermesVersion() || manifestVersion || release.version || 'unknown',
+      // FPK 应用版本轨：manifest 版本号（与 GitHub release tag 同轨）。
+      // 核心版本（hermesVersion）只属于 core 轨；update/check 的 app.current 必须用它，
+      // 否则核心 0.22.2 与 FPK tag 0.21.x 混比 → updateAvailable 恒 false。
+      fpkVersion: manifestVersion || 'unknown',
       electronVersion: '',
       nodeVersion: process.versions.node,
       platform: 'fnos',
@@ -264,7 +268,9 @@ export function createNasAdminHost(options = {}) {
     const release = JSON.parse(await readFile(bootstrapFile, 'utf8'));
     const core = await checkOfficialCoreRelease(release.version, fetchRelease);
     const version = await versionInfo();
-    const current = version.appVersion;
+    // app 轨 current 必须用 FPK 版本（manifest），与 GitHub tag 同轨可比；
+    // 取不到 manifest 时才退回 appVersion（可能带核心版本串，解析失败走 latest!==current 兜底）。
+    const current = version.fpkVersion && version.fpkVersion !== 'unknown' ? version.fpkVersion : version.appVersion;
     let app = { current, latest: null, updateAvailable: false, releaseUrl: '', downloadUrl: '', body: '', publishedAt: null };
     const ghHeaders = () => {
       const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'fnos-hermes-agent' };
