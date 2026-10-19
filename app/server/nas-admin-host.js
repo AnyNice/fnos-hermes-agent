@@ -74,6 +74,9 @@ export function createNasAdminHost(options = {}) {
   const gatewayPidPath = options.gatewayPidPath || path.join(varDir, 'gateway.pid');
   const dashboardPidPath = options.dashboardPidPath || path.join(varDir, 'dashboard.pid');
   const readPid = options.readPid || (() => null);
+  const isPortListening = options.isPortListening || (() => false);
+  const dashboardSpawnTs = options.dashboardSpawnTs || (() => 0);
+  const dashboardGraceMs = Number(options.dashboardGraceMs || 120000);
   const stopDashboard = options.stopDashboard || (async () => {});
   const startDashboard = options.startDashboard || (() => ({ ok: false, error: '未配置' }));
   const startGateway = options.startGateway || (() => ({ ok: false, error: '网关启停未配置' }));
@@ -223,6 +226,11 @@ export function createNasAdminHost(options = {}) {
   }
 
   // ── 原生后端健康检查（复用 dashboard 9219，注入会话令牌）──
+  // 修「状态卡永远卡 starting」：旧版 fetch 一旦抛异常就无脑回 starting，
+  // 而 dashboard 其实早已 READY（log: 17:19 DASHBOARD_READY，17:32 service start 仍报 starting）→
+  // UI 观感"一直在重复启动"，实际进程稳定运行中。现按「端口 LISTEN > 冷启动宽限期 > pid 判死」
+  // 三级判据回真实状态：端口在监听 = 已就绪；进程在但端口未起且仍在冷启动宽限期内 = starting；
+  // 进程在但超宽限期仍无端口 = unresponsive（挂死，提示手动重启）；无 pid = stopped。
   async function health() {
     try {
       const response = await fetch(`http://${dashboardBind}:${dashboardPort}/api/status`, {
@@ -233,7 +241,18 @@ export function createNasAdminHost(options = {}) {
       if (!response.ok) return { state: 'unavailable', status: response.status };
       return { state: 'ready', native: await response.json() };
     } catch {
-      return { state: readPid(dashboardPidPath) ? 'starting' : 'stopped' };
+      const dp = readPid(dashboardPidPath);
+      if (isPortListening(dashboardPort)) {
+        // 端口 LISTEN = dashboard web server 已起（READY 即监听 9219）。/api/status 瞬断/鉴权抖动不算故障。
+        return { state: 'ready', portListening: true, pid: dp || null };
+      }
+      if (dp) {
+        const inGrace = Date.now() - dashboardSpawnTs() < dashboardGraceMs;
+        return inGrace
+          ? { state: 'starting', pid: dp }
+          : { state: 'unresponsive', pid: dp, hint: '工作服务进程存活但端口未监听（可能挂死），可点「启动工作服务」重新拉起' };
+      }
+      return { state: 'stopped' };
     }
   }
 
@@ -322,6 +341,88 @@ export function createNasAdminHost(options = {}) {
     return { ok: true, saved: false };
   }
   const patState = () => ({ hasPat: !!getGitHubPAT(), source: String(process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || '').trim() ? 'env' : (existsSync(githubPatFile) ? 'file' : 'none') });
+
+  // ── 取「最新发布」的 FPK 资产（不比较版本，只拿下载直链）——供 update/download 服务端代下 ──
+  async function latestFpkAsset() {
+    const ghHeaders = () => {
+      const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'fnos-hermes-agent' };
+      const pat = getGitHubPAT();
+      if (pat) headers.Authorization = `Bearer ${pat}`;
+      return headers;
+    };
+    let data = null;
+    try {
+      let r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases?per_page=1`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
+      if (r.ok) { const list = await r.json(); data = Array.isArray(list) ? (list[0] || null) : null; }
+      if (!data) {
+        r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases/latest`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
+        if (r.ok) data = await r.json();
+      }
+    } catch (e) { return { error: `查询最新 Release 失败：${e.message}` }; }
+    const asset = (data?.assets || []).find(a => /\.fpk$/i.test(a?.name || ''));
+    if (!data || !asset?.browser_download_url) return { error: '未找到 FPK 下载资产' };
+    return {
+      tag: String(data.tag_name || '').replace(/^fnos-hermes-agent_v|^v/, '').trim(),
+      name: asset.name,
+      url: asset.browser_download_url,
+      body: data.body || '',
+      publishedAt: data.published_at,
+    };
+  }
+
+  // 把首块（已读做 gzip 头校验）与后续流合并为 async iterable，供 Response 流式透传。
+  async function* streamConcat(first, reader) {
+    if (first && first.value && first.value.length) yield Buffer.from(first.value);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) yield Buffer.from(value);
+    }
+  }
+
+  // 服务端代下 FPK：浏览器只面对「同源 + Content-Disposition + Content-Length」，原生下载器显示进度；
+  // 网络出口走 NAS 自身，按「GitHub 加速中继（大陆可达）→ GitHub 直连」多通道依次尝试，取第一个成功。
+  // 根治「前端 <a target=_blank> 直连 github.com 在飞牛 webview 里跨站被拦 + 国内直连 310MB 卡死」问题。
+  async function downloadFpkStream() {
+    const asset = await latestFpkAsset();
+    if (asset.error) return json(null, 404, { error: asset.error });
+    const ghproxyBase = (process.env.HERMES_GHPROXY || 'https://ghproxy.net/').replace(/\/+$/, '');
+    const rel = asset.url.replace(/^https?:\/\//, ''); // github.com/AnyNice/.../releases/download/...
+    const channels = [
+      { label: 'GitHub 加速中继', url: `${ghproxyBase}/${rel}`, timeoutMs: 180000 },
+      { label: 'GitHub 直连', url: asset.url, timeoutMs: 600000 },
+    ];
+    let lastErr = '';
+    for (const ch of channels) {
+      let up = null;
+      try {
+        up = await fetchRelease(ch.url, { signal: AbortSignal.timeout(ch.timeoutMs) });
+        if (!up.ok || !up.body) { lastErr = `${ch.label} HTTP ${up?.status ?? 'n/a'}`; continue; }
+        // 首块校验 gzip 头（FPK 是 gzip tar：0x1f 0x8b），非文件内容（HTML 预览页等）立即换下一通道
+        const reader = up.body.getReader();
+        const first = await reader.read();
+        const head = Buffer.from(first?.value || []);
+        if (!(head.length > 2 && head[0] === 0x1f && head[1] === 0x8b)) {
+          lastErr = `${ch.label} 返回内容非 FPK（非 gzip 头）`;
+          try { await reader.cancel(); } catch {}
+          continue;
+        }
+        log(`[app-download] 经 ${ch.label} 开始流式回传 ${asset.name}（tag=${asset.tag || 'latest'}）`);
+        const headers = {
+          'Content-Type': 'application/x-fpk',
+          'Content-Disposition': `attachment; filename="${asset.name}"`,
+          'X-Fpk-Tag': asset.tag || '',
+          'Cache-Control': 'no-store',
+        };
+        const cl = up.headers.get('content-length');
+        if (cl) headers['Content-Length'] = cl;
+        return new Response(streamConcat(first, reader), { status: 200, headers });
+      } catch (e) {
+        lastErr = `${ch.label} 异常：${e?.message || e}`;
+      }
+    }
+    return json(null, 502, { error: `FPK 下载失败（${lastErr}）。请检查网络，或在设置中保存 GitHub PAT 后重试。` });
+  }
 
   // ── 工作区（projects.tree 经 dashboard WS JSON-RPC sidecar）──
   // Tier-3 磁盘仓库发现：官方默认 desktop.repo_scan_roots=[] 即关闭磁盘扫描，且发现缓存
@@ -553,6 +654,13 @@ export function createNasAdminHost(options = {}) {
       if (tail === 'update/check' && method === 'GET') {
         try { const updates = await checkUpdates(); updates.github = patState(); return json(null, 200, updates); }
         catch (error) { return json(null, 502, { error: error.message }); }
+      }
+
+      // ── 服务端代下 FPK（ghproxy 中继 → GitHub 直连多通道，流式回传 + Content-Disposition）──
+      // 浏览器同源下载（原生下载器显示进度），根治 <a target=_blank> 直连 github.com 在
+      // 飞牛 webview 里跨站被拦 / 国内直连 310MB 卡死的问题。
+      if (tail === 'update/download' && method === 'GET') {
+        return downloadFpkStream();
       }
 
       // ── GitHub PAT（落盘 var/github_pat 0600；供 update/check 带 Bearer 绕过未认证限流）──

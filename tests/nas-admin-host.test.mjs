@@ -439,3 +439,99 @@ test('GitHub PAT: save/clear 0600 落盘 + check 带 Authorization + releases fa
     try { rmSync(tmp, { recursive: true, force: true }); } catch {}
   }
 });
+
+// update/download：服务端代下 FPK（ghproxy 中继内容非 FPK → 自动切 GitHub 直连；流式 + Content-Disposition）
+test('update/download: 多通道服务端代下 + 首块 gzip 头校验 + 流式回传', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'nas-host-dl-'));
+  const calls = [];
+  const ghMock = async (url, init = {}) => {
+    const u = String(url);
+    calls.push(u);
+    // download 资产 URL 也含「AnyNice/fnos-hermes-agent/releases」子串，必须先匹配 download
+    if (u.includes('/releases/download/')) {
+      // GitHub 直连：gzip tar 头 + 载荷
+      const payload = Buffer.concat([Buffer.from([0x1f, 0x8b, 0x08, 0x00]), Buffer.from('FAKE-FPK-PAYLOAD')]);
+      return new Response(payload, { status: 200, headers: { 'content-length': String(payload.length) } });
+    }
+    if (u.includes('ghproxy.net')) {
+      // 中继返回 HTML 预览页（非 gzip 头）→ 内容校验应拦截并切下一通道
+      return new Response('<html>preview</html>', { status: 200, headers: { 'content-type': 'text/html' } });
+    }
+    if (u.includes('AnyNice/fnos-hermes-agent/releases')) {
+      return Response.json([{ tag_name: 'fnos-hermes-agent_v0.21.155', html_url: 'https://github.com/AnyNice/fnos-hermes-agent/releases/tag/v0.21.155', published_at: '2026-10-19', assets: [{ name: 'fnos-hermes-agent_v0.21.155.fpk', browser_download_url: 'https://github.com/AnyNice/fnos-hermes-agent/releases/download/v0.21.155/fnos-hermes-agent_v0.21.155.fpk' }] }]);
+    }
+    return Response.json({});
+  };
+  const host = createNasAdminHost({
+    appDir: repoRoot, uiRoot: path.join(repoRoot, 'app/admin-ui'), workRoot: path.join(repoRoot, 'app/work-ui'),
+    bootstrapFile: path.join(repoRoot, 'config/bootstrap/hermes-source.json'),
+    coreRoot: path.join(repoRoot, 'app/hermes-src'),
+    dashboardBind: '127.0.0.1', dashboardPort: 1, dashboardSessionToken: TOKEN, readPid: () => 1234,
+    proxyDashboard: fakeProxyDashboard([]), log: () => {}, fetchRelease: ghMock,
+    githubRepo: 'AnyNice/fnos-hermes-agent', githubPatFile: path.join(tmp, 'github_pat'),
+  });
+  try {
+    const r = await host.handle(new Request('http://nas/admin/api/host/update/download'));
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-disposition') || '', /fnos-hermes-agent_v0\.21\.155\.fpk/);
+    assert.equal(r.headers.get('x-fpk-tag'), '0.21.155');
+    // 中继通道被试过一次（拦截在内容校验层），随后走 GitHub 直连
+    assert.ok(calls.some(c => c.includes('ghproxy.net')), '应尝试过加速中继');
+    assert.ok(calls.some(c => c.includes('/releases/download/')), '中继内容非 FPK 后应切 GitHub 直连');
+    const bytes = Buffer.from(await r.arrayBuffer());
+    assert.equal(bytes[0], 0x1f);
+    assert.equal(bytes[1], 0x8b);
+    assert.match(bytes.toString('utf8'), /FAKE-FPK-PAYLOAD/);
+
+    // 失败路径：Release 无 .fpk 资产 → 404 结构化拒绝（不挂起、不 5xx）
+    const hostNoAsset = createNasAdminHost({
+      appDir: repoRoot, uiRoot: path.join(repoRoot, 'app/admin-ui'), workRoot: path.join(repoRoot, 'app/work-ui'),
+      bootstrapFile: path.join(repoRoot, 'config/bootstrap/hermes-source.json'),
+      coreRoot: path.join(repoRoot, 'app/hermes-src'),
+      dashboardBind: '127.0.0.1', dashboardPort: 1, dashboardSessionToken: TOKEN, readPid: () => 1234,
+      proxyDashboard: fakeProxyDashboard([]), log: () => {},
+      fetchRelease: async () => Response.json([{ tag_name: 'fnos-hermes-agent_v0.21.155', assets: [{ name: 'notes.txt' }] }]),
+      githubRepo: 'AnyNice/fnos-hermes-agent', githubPatFile: path.join(tmp, 'github_pat'),
+    });
+    const r2 = await hostNoAsset.handle(new Request('http://nas/admin/api/host/update/download'));
+    assert.equal(r2.status, 404);
+    assert.match((await r2.json()).error, /未找到 FPK 下载资产/);
+  } finally {
+    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// health() 三级判据（修 log 2「dashboard 已 READY 但 status 永远回 starting → UI 观感重复启动」）
+test('health: 端口LISTEN优先判ready / 宽限期starting / 超宽限unresponsive / 无pid stopped', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'nas-host-health-'));
+  const realFetch = globalThis.fetch;
+  // 模拟 /api/status 抖动（超时/拒连）：无论端口实际状态如何，fetch 必失败，走 catch 分支
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/api/status')) throw new Error('ECONNREFUSED(mock)');
+    return realFetch(url, init);
+  };
+  const mk = (extra) => createNasAdminHost({
+    appDir: repoRoot, uiRoot: path.join(repoRoot, 'app/admin-ui'), workRoot: path.join(repoRoot, 'app/work-ui'),
+    bootstrapFile: path.join(repoRoot, 'config/bootstrap/hermes-source.json'),
+    coreRoot: path.join(repoRoot, 'app/hermes-src'),
+    dashboardBind: '127.0.0.1', dashboardPort: 9219,
+    dashboardSessionToken: TOKEN, readPid: () => 4242,
+    proxyDashboard: fakeProxyDashboard([]), log: () => {},
+    githubRepo: 'AnyNice/fnos-hermes-agent', githubPatFile: path.join(tmp, 'github_pat'),
+    ...extra,
+  });
+  const stateOf = async (extra) => (await (await mk(extra).handle(new Request('http://nas/admin/api/host/status'))).json()).backend.state;
+  try {
+    // A) log 2 铁证：dashboard READY（9219 LISTEN）+ /api/status 抖动 → ready（旧版回 starting）
+    assert.equal(await stateOf({ isPortListening: () => true }), 'ready');
+    // B) 端口未起 + 刚 spawn 5s（宽限期 120s 内）→ starting
+    assert.equal(await stateOf({ isPortListening: () => false, dashboardSpawnTs: () => Date.now() - 5000, dashboardGraceMs: 120000 }), 'starting');
+    // C) 端口未起 + spawn 3min（超宽限）→ unresponsive（挂死提示）
+    assert.equal(await stateOf({ isPortListening: () => false, dashboardSpawnTs: () => Date.now() - 180000, dashboardGraceMs: 120000 }), 'unresponsive');
+    // D) 无 pid → stopped
+    assert.equal(await stateOf({ isPortListening: () => false, readPid: () => null }), 'stopped');
+  } finally {
+    globalThis.fetch = realFetch;
+    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
