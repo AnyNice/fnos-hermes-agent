@@ -10982,22 +10982,49 @@ function startServer() {
 // 当 providers-state.yaml 中已有真实服务商时，monitor 启动后自动拉起服务
 function maybeAutoStartServices() {
   try {
+    // ── 自动启动判据（v0.21.157：monitor 重启后 dashboard 保持热，消除"开面板=冷启动"的重复启动观感）──
+    // dashboard 判据(D)：providers-state.yaml 有任意 provider 块，或原生 config.yaml 有 model: 块
+    //   → dashboard 是 Web UI，只要配了模型就应保持热（含 hermes/Nous：未认证仅聊天不可用，不影响面板本身）
+    // gateway  判据(G)：providers-state.yaml 有真实 provider(非 hermes)，或 config.yaml 的 provider 非 hermes
+    //   → gateway 需要可认证的真实模型才值得空跑，避免无模型时反复 warning
+    let dashReason = null, gwReason = null;
     const statePath = `${VAR_DIR}/providers-state.yaml`;
-    if (!existsSync(statePath)) return;
-    const content = readFileSync(statePath, "utf8");
-    const ids = [...content.matchAll(/^  ([a-zA-Z0-9_-]+):\s*$/gm)].map(m => m[1]);
-    const hasRealProvider = ids.some(id => id !== "hermes");
-    if (!hasRealProvider) {
-      log("Auto-start skipped: no real provider in providers-state.yaml");
+    if (existsSync(statePath)) {
+      const ids = [...readFileSync(statePath, "utf8").matchAll(/^  ([a-zA-Z0-9_-]+):\s*$/gm)].map(m => m[1]);
+      const anyP = ids.filter(id => id && id !== "");
+      const realP = ids.filter(id => id !== "hermes");
+      if (anyP.length) dashReason = `providers-state（${anyP.join(",")}）`;
+      if (realP.length) gwReason = `providers-state 真实 provider（${realP.join(",")}）`;
+    }
+    if (!dashReason && !gwReason) {
+      try {
+        const cfgPath = `${DATA_DIR}/config.yaml`;
+        if (existsSync(cfgPath)) {
+          const yml = readFileSync(cfgPath, "utf8");
+          const provMatch = yml.match(/^model:\s*\n\s+provider:\s*(\S+)/m);
+          if (provMatch && provMatch[1] && provMatch[1].trim()) {
+            dashReason = `config.yaml model（provider=${provMatch[1]}）`;
+            if (provMatch[1].trim() !== "hermes") gwReason = `config.yaml 真实 provider（${provMatch[1]}）`;
+          }
+        }
+      } catch {}
+    }
+    if (!dashReason && !gwReason) {
+      log("Auto-start skipped: providers-state.yaml 与 config.yaml 均无模型配置");
       return;
     }
-    if (readPid(PID_GATEWAY) || readPid(PID_DASHBOARD)) {
-      log("Auto-start skipped: gateway/dashboard already running");
-      return;
+    let startedAny = false;
+    if (gwReason && !readPid(PID_GATEWAY)) {
+      log(`Auto-starting gateway（${gwReason}）...`);
+      spawnHermes("gateway", PID_GATEWAY, ["gateway", "run", "--replace"]);
+      startedAny = true;
     }
-    log("Auto-starting gateway & dashboard (provider config detected) ...");
-    spawnHermes("gateway",   PID_GATEWAY,   ["gateway", "run", "--replace"]);
-    spawnHermes("dashboard", PID_DASHBOARD, ["dashboard", "--host", DASHBOARD_BIND, "--port", String(DASHBOARD_PORT), "--no-open", "--skip-build", "--insecure"]);
+    if (dashReason && !readPid(PID_DASHBOARD)) {
+      log(`Auto-starting dashboard（${dashReason}）...`);
+      spawnHermes("dashboard", PID_DASHBOARD, ["dashboard", "--host", DASHBOARD_BIND, "--port", String(DASHBOARD_PORT), "--no-open", "--skip-build", "--insecure"]);
+      startedAny = true;
+    }
+    if (!startedAny) log("Auto-start skipped: gateway/dashboard 已在运行");
   } catch (err) {
     log(`Auto-start error: ${err?.message || err}`);
   }
