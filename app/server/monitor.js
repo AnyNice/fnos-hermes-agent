@@ -11001,10 +11001,16 @@ function maybeAutoStartServices() {
         const cfgPath = `${DATA_DIR}/config.yaml`;
         if (existsSync(cfgPath)) {
           const yml = readFileSync(cfgPath, "utf8");
-          const provMatch = yml.match(/^model:\s*\n\s+provider:\s*(\S+)/m);
-          if (provMatch && provMatch[1] && provMatch[1].trim()) {
-            dashReason = `config.yaml model（provider=${provMatch[1]}）`;
-            if (provMatch[1].trim() !== "hermes") gwReason = `config.yaml 真实 provider（${provMatch[1]}）`;
+          // 块级解析：只取 model: 块内的第一个 provider: 行（157 的 ^model:\s*\n\s+provider:\s*(\S+)
+          // 用 \s* 跨行匹配，会把嵌套块子键误抓进来，如日志里的"真实 provider（default:）"垃圾值）
+          const blockMatch = yml.match(/^model:[ \t]*\n((?:[ \t]+\S[^\n]*\n)*)/m);
+          if (blockMatch) {
+            // provider 只取同行标量值；嵌套 map（无同行值）→ 空串，不编造
+            const provLine = blockMatch[1].match(/^[ \t]+provider:[ \t]*(\S+)/m);
+            const provId = provLine?.[1]?.trim() || "";
+            dashReason = provId ? `config.yaml model（provider=${provId}）` : "config.yaml model（未读到 provider 标量）";
+            // gateway 仅当「真实 provider（非 hermes/Nous）」才值得空跑（157 语义保留）
+            if (provId && provId !== "hermes") gwReason = `config.yaml 真实 provider（${provId}）`;
           }
         }
       } catch {}

@@ -266,15 +266,26 @@ export function createNasAdminHost(options = {}) {
       const manifest = await readFile(path.join(appDir, 'manifest'), 'utf8');
       manifestVersion = manifest.match(/^version\s*=\s*([\d.]+)/m)?.[1] || '';
     } catch {}
+    // v158：FPK 版本源优先级——hermes-version.env 的 APP_VERSION（打包器与 manifest 同步校验、
+    //   保证部署到设备；FPK 框架不部署 manifest 到应用目录 → 读不到时版本轨掉回核心版本，
+    //   即 NAS 上"应用 0.22.2 → 0.21.157"混轨显示 + 更新检查恒"无更新"的根因）
+    //   → APP_DIR/manifest（仓库/测试场景兜底）→ 核心版本（仅最后兜底，会混轨，标记 source）。
+    let fpkVersion = manifestVersion, fpkVersionSource = manifestVersion ? 'manifest' : 'unknown';
+    try {
+      const envText = await readFile(path.join(appDir, 'config/bootstrap/hermes-version.env'), 'utf8');
+      const m = envText.match(/^APP_VERSION\s*=\s*([\d.]+)/m);
+      if (m?.[1]) { fpkVersion = m[1]; fpkVersionSource = 'hermes-version.env'; }
+    } catch {}
     return {
       ...release,
       builtAt: stamp.builtAt || null,
       commitDate: stamp.commitDate || null,
       appVersion: hermesVersion() || manifestVersion || release.version || 'unknown',
-      // FPK 应用版本轨：manifest 版本号（与 GitHub release tag 同轨）。
+      // FPK 应用版本轨（hermes-version.env APP_VERSION / manifest，与 GitHub release tag 同轨）。
       // 核心版本（hermesVersion）只属于 core 轨；update/check 的 app.current 必须用它，
       // 否则核心 0.22.2 与 FPK tag 0.21.x 混比 → updateAvailable 恒 false。
-      fpkVersion: manifestVersion || 'unknown',
+      fpkVersion: fpkVersion || 'unknown',
+      fpkVersionSource,
       electronVersion: '',
       nodeVersion: process.versions.node,
       platform: 'fnos',

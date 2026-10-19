@@ -32,14 +32,22 @@ const DISK_SOURCE_LABELS: Record<string, string> = {
 const CORE_SOURCE_LABELS: Record<string, string> = {
   desktop: '桌面端（NAS 无此文件）', update: 'Hermes 更新', handoff: '桌面更新交接', mcp: 'MCP 子进程',
 };
-// agent/gateway/gui/error 在 NAS 磁盘可读，归磁盘组；desktop/update/handoff/mcp 仅核心服务能读，归核心组。
-const diskSourceValues = ['all', ...Object.keys(DISK_SOURCE_LABELS).filter(k => k !== 'all')];
-const coreSourceValues = Object.keys(CORE_SOURCE_LABELS);
-const sourceGroups = computed(() => [
-  { label: '宿主磁盘日志（NAS 本地读取）', children: diskSourceValues.map(v => ({ value: v, label: DISK_SOURCE_LABELS[v] })) },
-  { label: '核心日志（需 Hermes 服务运行）', children: coreSourceValues.map(v => ({ value: v, label: CORE_SOURCE_LABELS[v] })) },
-]);
-const isCore = computed(() => coreSourceValues.includes(source.value));
+// v158：按本机真实落盘情况过滤来源——后端每次返回 sources（有日志文件的来源清单）；
+// NAS 上不存在的来源（如核心 4 项桌面专属）整项从下拉移除，避免用户点进空态。
+// 首帧（availableSources 尚未返回）先展示静态全量，避免闪烁空列表。
+const diskSourceValues = computed(() => availableSources.value.length
+  ? Object.keys(DISK_SOURCE_LABELS).filter(k => k !== 'all' && availableSources.value.includes(k))
+  : Object.keys(DISK_SOURCE_LABELS).filter(k => k !== 'all'));
+const coreSourceValues = computed(() => availableSources.value.length
+  ? Object.keys(CORE_SOURCE_LABELS).filter(k => availableSources.value.includes(k))
+  : Object.keys(CORE_SOURCE_LABELS));
+const sourceGroups = computed(() => {
+  const groups: { label: string; children: { value: string; label: string }[] }[] = [];
+  groups.push({ label: '宿主磁盘日志（NAS 本地读取）', children: ['all', ...diskSourceValues.value].map(v => ({ value: v, label: DISK_SOURCE_LABELS[v] })) });
+  if (coreSourceValues.value.length) groups.push({ label: '核心日志（需 Hermes 服务运行）', children: coreSourceValues.value.map(v => ({ value: v, label: CORE_SOURCE_LABELS[v] })) });
+  return groups;
+});
+const isCore = computed(() => coreSourceValues.value.includes(source.value));
 const serviceReady = computed(() => runtime.status?.backend.state === 'ready');
 const levelOptions = ['all', 'debug', 'info', 'warning', 'error'].map(value => ({ value, label: ({ all: '全部', debug: 'DEBUG 及以上', info: 'INFO 及以上', warning: 'WARNING 及以上', error: 'ERROR 及以上' } as Record<string, string>)[value] }));
 const componentOptions = ['all', 'gateway', 'agent', 'tools', 'cli', 'cron', 'gui'].map(value => ({ value, label: ({ all: '全部组件', gateway: 'Gateway / 通讯', agent: 'Agent / 模型', tools: 'Tools / MCP', cli: 'Hermes CLI', cron: 'Cron', gui: 'GUI / Web 服务' } as Record<string, string>)[value] }));
@@ -109,6 +117,11 @@ const emptyHint = computed(() => {
 
 watch(() => runtime.profile, () => changed());
 watch(source, pickSource);
+// 来源过滤后，若当前选中项已不在可选清单（如本机未落盘的核心来源）→ 回落 all，避免悬空选中
+watch([sourceGroups, source], () => {
+  const values = sourceGroups.value.flatMap(g => g.children.map(c => c.value));
+  if (!values.includes(source.value)) source.value = 'all';
+});
 onMounted(() => { void refresh(); timer = setInterval(() => { if (live.value) void refresh(); }, 2000); });
 onBeforeUnmount(() => { disposed = true; clearInterval(timer); clearTimeout(debounce); });
 </script>

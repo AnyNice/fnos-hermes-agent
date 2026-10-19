@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, toRef, watch } from 'vue';
-import { NAlert, NButton, NCard, NCollapse, NCollapseItem, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage } from 'naive-ui';
+import { NAlert, NButton, NCard, NCollapse, NCollapseItem, NFormItem, NInput, NInputNumber, NModal, NProgress, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage } from 'naive-ui';
 import { Download, Activity, Eraser } from '@vicons/tabler';
 import { native, request, hostRoot } from '../api';
 import { useRuntime } from '../stores/runtime';
@@ -11,9 +11,46 @@ const edits=reactive<Record<string,any>>({});const jsonDrafts=reactive<Record<st
 const rawModal=ref(false);const rawBusy=ref(false);const rawYaml=ref('');const rawPath=ref('');
 // ── 应用更新（从概览页移入设置页）：核心与适配层始终作为同一个 FPK 发布 ──
 const checking=ref(false);const release=ref<any>(null);
-// 「获取 FPK」走宿主同源下载端点（服务端代下：ghproxy 中继→GitHub 直连，流式 + Content-Disposition），
-// 浏览器原生下载器接管 → 显示进度、不被 webview 跨站拦截（旧版直链 github.com target=_blank 在飞牛面板卡死）。
-const fpkDownloadUrl=computed(()=>{try{return new URL('api/host/update/download',hostRoot).href;}catch{return '';}});
+// 「获取 FPK」（v158 起）：页面内流式下载——宿主端点服务端代下（ghproxy 中继→GitHub 直连多通道），
+// 前端用同源 fetch + ReadableStream 读流，实时进度条/百分比/MB/s/已收大小；完成弹原生保存。
+// 旧版 <a download> 把下载丢给 webview 原生下载器，移动端面板里全程看不到进度（「点了没反应没进度没指数」）。
+const dl = reactive({ running: false, total: 0, loaded: 0, speed: 0, done: false, error: '', fileName: 'hermes-agent.fpk' });
+async function downloadFpk() {
+  if (dl.running) return;
+  dl.running = true; dl.done = false; dl.error = ''; dl.loaded = 0; dl.total = 0; dl.speed = 0;
+  let lastLoaded = 0; let lastTs = Date.now();
+  try {
+    const resp = await fetch(new URL('api/host/update/download', hostRoot), { credentials: 'same-origin' });
+    if (!resp.ok) {
+      const j: any = await resp.json().catch(() => ({}));
+      throw new Error(j.error || `下载失败（HTTP ${resp.status}）`);
+    }
+    dl.total = Number(resp.headers.get('content-length')) || 0;
+    dl.fileName = (resp.headers.get('content-disposition') || '').match(/filename="?([^";]+)"?/)?.[1] || 'hermes-agent.fpk';
+    const reader = resp.body?.getReader();
+    if (!reader) throw new Error('当前 WebView 不支持流式读取，请改用浏览器直接打开管理页下载。');
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) {
+        chunks.push(value);
+        dl.loaded += value.length;
+        const now = Date.now();
+        if (now - lastTs >= 500) { dl.speed = Math.max(0, dl.loaded - lastLoaded) / ((now - lastTs) / 1000); lastLoaded = dl.loaded; lastTs = now; }
+      }
+    }
+    const blobUrl = URL.createObjectURL(new Blob(chunks as unknown as BlobPart[], { type: 'application/octet-stream' }));
+    const a = document.createElement('a'); a.href = blobUrl; a.download = dl.fileName; a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    dl.done = true;
+    message.success(`下载完成：${dl.fileName}（${(dl.loaded / 1048576).toFixed(1)} MB），请在下载中保存后经飞牛应用中心覆盖安装。`);
+  } catch (e) {
+    dl.error = (e as Error).message;
+  } finally {
+    dl.running = false;
+  }
+}
 async function checkUpdate(){checking.value=true;try{release.value=await request('api/host/update/check');message.success(release.value.core?.updateAvailable||release.value.app?.updateAvailable?'发现可用更新':'当前已是最新稳定版');}catch(e){message.error((e as Error).message);}finally{checking.value=false;}}
 // ── GitHub PAT（落盘 0600，查 Release 时带 Bearer 绕过未认证限流）──
 const patDraft=ref('');const patBusy=ref(false);
@@ -79,7 +116,7 @@ async function saveRawConfig(){rawBusy.value=true;try{await native('/api/config/
     </n-collapse></n-card>
   </ResourceState>
   <n-card title="维护与恢复" :bordered="false" class="mb"><p class="muted mb">接入 Hermes 核心维护能力：doctor 诊断会检查配置与依赖（--fix 自动修复，--live 追加对工具后端的只读真实网络探针），日志清理仅限白名单 8 个文件。完整备份 / 恢复 / 依赖重装随 FPK 升级与飞牛应用中心完成，本页不执行这些破坏性操作。</p><n-space class="mb"><n-button :loading="maintBusy" @click="runDoctor(false)"><template #icon><n-icon :component="Activity"/></template>运行诊断（hermes doctor）</n-button><n-button :loading="maintBusy" @click="runDoctor(true)"><template #icon><n-icon :component="Activity"/></template>诊断 + 网络探针（--live）</n-button></n-space><n-alert v-if="doctorResult" :type="doctorResult.ok?'success':'error'" :bordered="false" class="mb"><div style="font-size:12px;line-height:1.7;white-space:pre-wrap;font-family:Consolas,monospace">{{ doctorResult.error||(doctorResult.summary||'诊断完成') }}</div><div v-if="doctorResult.command" class="muted mt" style="font-size:11px">命令：{{ doctorResult.command }} · 退出码 {{ doctorResult.exitCode }}<span v-if="doctorResult.durationMs!=null"> · 耗时 {{ (doctorResult.durationMs/1000).toFixed(1) }}s</span></div><n-button v-if="(doctorResult.lines||[]).length>8" text type="primary" size="tiny" @click="doctorExpanded=!doctorExpanded">{{ doctorExpanded?'收起完整输出':'查看完整输出' }}</n-button><div v-if="doctorExpanded" class="muted mt" style="font-size:11px;line-height:1.6;white-space:pre-wrap;font-family:Consolas,monospace;max-height:220px;overflow:auto">{{ (doctorResult.lines||[]).join('\n') }}</div></n-alert><n-collapse><n-collapse-item title="清空日志（白名单 8 文件）" name="clearlog"><div class="muted mb">截断为 0 字节，不影响运行中进程。可选文件：</div><div class="inline mb"><n-select v-model:value="clearFile" :options="logFiles.map(f=>({label:f,value:f}))" style="width:200px" /><n-button :disabled="!clearFile" @click="clearLog(clearFile)"><template #icon><n-icon :component="Eraser"/></template>清空</n-button></div></n-collapse-item></n-collapse></n-card>
-  <n-card title="应用更新" :bordered="false" class="mb"><div class="split"><div class="resource-description"><h3>完整 FPK 更新</h3><p>核心与适配层始终作为同一个 FPK 发布。升级时由飞牛应用中心覆盖安装，保留 Profile、会话、凭据和工作区数据，避免核心与适配层版本混装。</p><div v-if="release" class="mt"><n-tag :type="release.core?.updateAvailable?'warning':'success'" :bordered="false">Hermes {{ release.core?.current }} → {{ release.core?.latest }}</n-tag><span class="muted" style="margin-left:10px">应用 {{ release.app?.current }}{{ release.app?.latest?` → ${release.app.latest}`:'' }}</span></div><n-collapse v-if="release?.app?.body" :default-expanded="[]" class="mt" size="small"><n-collapse-item title="更新说明" name="notes"><pre class="muted" style="margin:0;font-size:11px;line-height:1.6;white-space:pre-wrap">{{ release.app.body }}</pre></n-collapse-item></n-collapse></div><n-space vertical><n-space><n-button :loading="checking" @click="checkUpdate">检查更新</n-button><n-button v-if="release?.app?.downloadUrl||release?.app?.releaseUrl" type="primary" tag="a" :href="fpkDownloadUrl" download><template #icon><n-icon :component="Download"/></template>获取 FPK</n-button></n-space><div class="muted" style="font-size:11px">检查更新需要访问 GitHub Release。{{ release?.github?.hasPat ? `当前使用已保存的 PAT（${release.github.source==='env'?'环境变量':'落盘'}），不受未认证限流。` : '未配置 PAT 时走未认证通道（60 次/小时限流，够用但偶尔会撞墙）。' }}</div><n-space v-if="release?.github?.hasPat||patDraft" size="small"><n-input v-model:value="patDraft" :show="!patState.hasPat" type="password" placeholder="GitHub Personal Access Token（可留空，保存留空即清除）" style="width:300px" :disabled="patBusy" /><n-button :loading="patBusy" @click="savePat">{{ patState.hasPat?'更新 / 清除':'保存 PAT' }}</n-button></n-space></n-space></div></n-card>
+  <n-card title="应用更新" :bordered="false" class="mb"><div class="split"><div class="resource-description"><h3>完整 FPK 更新</h3><p>核心与适配层始终作为同一个 FPK 发布。升级时由飞牛应用中心覆盖安装，保留 Profile、会话、凭据和工作区数据，避免核心与适配层版本混装。</p><div v-if="release" class="mt"><div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px"><n-tag :type="release.core?.updateAvailable?'warning':'success'" :bordered="false">Hermes 核心 {{ release.core?.current }}<template v-if="release.core?.updateAvailable"> → {{ release.core?.latest }}</template></n-tag><span v-if="!release.core?.updateAvailable" class="muted" style="font-size:11px">核心已是最新</span></div><div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px"><n-tag :type="release.app?.updateAvailable?'warning':'success'" :bordered="false">应用 FPK {{ release.app?.current }}<template v-if="release.app?.latest && release.app?.updateAvailable"> → {{ release.app.latest }}</template></n-tag><span v-if="release.app?.latest && !release.app?.updateAvailable" class="muted" style="font-size:11px">应用已是最新</span></div></div></div><n-collapse v-if="release?.app?.body" :default-expanded="[]" class="mt" size="small"><n-collapse-item title="更新说明" name="notes"><pre class="muted" style="margin:0;font-size:11px;line-height:1.6;white-space:pre-wrap">{{ release.app.body }}</pre></n-collapse-item></n-collapse></div><n-space vertical><n-space><n-button :loading="checking" @click="checkUpdate">检查更新</n-button><n-button v-if="release?.app?.downloadUrl||release?.app?.releaseUrl" type="primary" :disabled="dl.running" @click="downloadFpk"><template #icon><n-icon :component="Download"/></template>{{ dl.running?'下载中…':(dl.done?'重新下载':'获取 FPK') }}</n-button></n-space><div v-if="dl.running||dl.error||dl.done" class="mt"><n-progress type="line" :percentage="dl.total?Math.min(100,Math.round(dl.loaded/dl.total*100)):100" :status="dl.error?'error':(dl.done?'success':'default')" :show-indicator="false" :height="8" style="margin:0" /><div class="muted" style="font-size:11px;margin-top:4px">{{ dl.error ? `下载失败：${dl.error}` : dl.done ? `已完成：${dl.fileName}` : `${dl.total?(dl.loaded/1048576).toFixed(1)+' / '+(dl.total/1048576).toFixed(1)+' MB':'…  MB'} · ${Math.round((dl.speed/1048576)*10)/10} MB/s` }}</div></div><div class="muted" style="font-size:11px">检查更新需要访问 GitHub Release。{{ release?.github?.hasPat ? `当前使用已保存的 PAT（${release.github.source==='env'?'环境变量':'落盘'}），不受未认证限流。` : '未配置 PAT 时走未认证通道（60 次/小时限流，够用但偶尔会撞墙）。' }}</div><n-space v-if="release?.github?.hasPat||patDraft" size="small"><n-input v-model:value="patDraft" :show="!patState.hasPat" type="password" placeholder="GitHub Personal Access Token（可留空，保存留空即清除）" style="width:300px" :disabled="patBusy" /><n-button :loading="patBusy" @click="savePat">{{ patState.hasPat?'更新 / 清除':'保存 PAT' }}</n-button></n-space></n-space></div></n-card>
   <n-card title="关于" :bordered="false"><div class="about-grid"><span>Hermes 核心</span><b>{{ runtime.version?.version||runtime.version?.tag||'—' }}</b><span>更新方式</span><span>飞牛应用中心整包升级（FNS_FPK）</span><span>数据目录</span><code>{{ runtime.status?.dataRoot||'—' }}</code><span>运行环境</span><span>飞牛 NAS（hermes-agent FPK）</span></div></n-card>
   <n-modal v-model:show="rawModal" preset="card" title="配置文件" style="width:820px;max-width:calc(100vw - 32px)"><n-alert type="warning" :bordered="false" class="mb">这是当前 Profile 的原始 YAML。无效内容会被 Hermes 拒绝；保存后需要重启 Hermes。</n-alert><n-form-item label="文件路径"><n-input :value="rawPath" readonly /></n-form-item><n-form-item label="config.yaml"><n-input v-model:value="rawYaml" type="textarea" :autosize="{minRows:18,maxRows:28}" class="raw-config-editor" /></n-form-item><template #footer><div class="modal-footer"><n-button @click="rawModal=false">取消</n-button><n-button type="primary" :loading="rawBusy" @click="saveRawConfig">保存配置文件</n-button></div></template></n-modal>
 </template>

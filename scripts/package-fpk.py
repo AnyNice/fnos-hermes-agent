@@ -52,6 +52,15 @@ def validate() -> str:
     match = re.search(r"^version\s*=\s*(\S+)", manifest, re.MULTILINE)
     if not match:
         raise ValueError("Missing application version in manifest")
+    # APP_VERSION 一致性门（v0.21.158）：hermes-version.env 的 APP_VERSION 必须与 manifest 严格同轨。
+    # 它是 NAS 设备上唯一可靠的 FPK 版本源（FPK 框架不部署 manifest 到应用目录，
+    # 面板 update/check 的"应用版本"依赖它）；二者漂移会导致面板版本轨混装/更新检查失真。
+    version_env = (ROOT / "config/bootstrap/hermes-version.env").read_text(encoding="utf-8")
+    app_match = re.search(r"^APP_VERSION\s*=\s*([\d.]+)", version_env, re.MULTILINE)
+    if not app_match:
+        raise ValueError("config/bootstrap/hermes-version.env 缺少 APP_VERSION（面板 FPK 版本源），需与 manifest version 一致")
+    if app_match[1] != match[1]:
+        raise ValueError(f"APP_VERSION({app_match[1]}) 与 manifest version({match[1]}) 不一致，拒绝出包")
     return match[1]
 
 
