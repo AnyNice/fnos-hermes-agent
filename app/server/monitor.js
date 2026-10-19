@@ -4811,10 +4811,12 @@ async function handleFetch(req) {
       }
       if (!url && source !== "webdav") return new Response(JSON.stringify({ ok: false, error: "未找到安装包下载地址（GitHub 可能限流，请稍后或改用网页下载）" }), { headers: jsonHeaders() });
       log(`[app-update] 开始自动更新 ${version || ""}（通道=${source}）：${url || "WebDAV"}`);
-      // 下载源：优先 alist 分享直链（用户飞牛 5667/p/<分享码>/<文件>，公众下载通道免认证、国内快）
-      // —— WebDAV（5244）仅为发布推送通道，不用于公众下载
-      const _shareBase = (process.env.HERMES_SHARE_BASE || "https://nas.aio.run:5667").replace(/\/+$/, "");
-      const _shareCode = process.env.HERMES_SHARE_CODE || "82005ffed8df428bb3";
+      // ② WebDAV（发布推送通道，仅内网用户自配）——凭证全从 data/.env 读，绝不硬编码
+      //    HERMES_WD_USER / HERMES_WD_PASS / HERMES_WD_BASE 三者缺一即视为未启用 webdav 源
+      // ③ OpenList 分享直链（公众下载通道免认证）——HERMES_SHARE_BASE + HERMES_SHARE_CODE 缺一不启用
+      //    无凭证的可选源会被整体跳过，最终兜底永远走 ④ GitHub 直连
+      const _shareBase = (process.env.HERMES_SHARE_BASE || "").replace(/\/+$/, "");
+      const _shareCode = (process.env.HERMES_SHARE_CODE || "").trim();
       const _verTag = String(version || "").replace(/^fnos-hermes-agent_v|^v/, "");
       const _shareFile = _verTag ? `fnos-hermes-agent_v${_verTag}.fpk` : "";
       let dl = null;
@@ -4822,9 +4824,9 @@ async function handleFetch(req) {
       if (_shareFile) {
         // ① WebDAV（用户内部更新通道，凭证从 data/.env 读取，不硬编码）
         const _envCfg = (() => { try { const t = readFileSync(`${DATA_DIR}/.env`, "utf8"); const g = k => { const m = t.match(new RegExp("^" + k + "\\s*=\\s*(.+)$", "m")); return m ? m[1].trim() : ""; }; return { u: g("HERMES_WD_USER"), p: g("HERMES_WD_PASS"), b: g("HERMES_WD_BASE") }; } catch { return { u: "", p: "", b: "" }; } })();
-        const _wdBase = (_envCfg.b || "https://fnos.aio.run").replace(/\/+$/, "");
-        const _wdPath = (_envCfg.p2 || "Fnosapp").replace(/^\/+|\/+$/g, "");
-        if (source !== "github") {
+        const _wdBase = (_envCfg.b || "").replace(/\/+$/, "");
+        const _wdPath = (_envCfg.p2 || "").replace(/^\/+|\/+$/g, "");
+        if (source !== "github" && _wdBase) {
           try {
             // 匿名调用 OpenList API 获取 raw_url（无需认证，公众下载通道）
             const apiUrl = `${_wdBase}/api/fs/get`;
@@ -4850,8 +4852,8 @@ async function handleFetch(req) {
             } else { log(`[app-update] OpenList API 失败 HTTP ${apiRes.status}，切换下一源`); dl = null; }
           } catch (e) { log(`[app-update] OpenList 下载异常: ${e.message}`); dl = null; }
         }
-        // ② alist 分享直链（公众通道，免认证）——仅 auto 通道使用
-        if (source === "auto" && !dl && !buf) {
+        // ② alist 分享直链（公众通道，免认证）——仅 auto 通道且用户配置了 HERMES_SHARE_BASE 时启用
+        if (source === "auto" && _shareBase && !dl && !buf) {
           try {
             const shareUrl = `${_shareBase}/p/${_shareCode}/${_shareFile}`;
             log(`[app-update] 尝试从 alist 分享直链下载: ${shareUrl}`);
