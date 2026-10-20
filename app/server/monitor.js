@@ -3658,7 +3658,7 @@ async function proxyDashboard(req) {
       const _up = await fetch(target, {
         method: "GET",
         headers: { "X-Hermes-Session-Token": DASHBOARD_SESSION_TOKEN },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(60000), // 与 native 通用转发 L3730 对齐：通讯页冷探测可能 >10s
       });
       if (_up.ok) {
         const _j = await _up.json().catch(() => null);
@@ -3727,7 +3727,7 @@ async function proxyDashboard(req) {
     const init = {
       method: req.method,
       headers,
-      signal: AbortSignal.timeout(_audioPath ? 180000 : 10000),
+      signal: AbortSignal.timeout(_audioPath ? 180000 : 60000),
     };
     if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
       init.body = req.body;

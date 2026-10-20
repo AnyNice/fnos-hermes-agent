@@ -289,11 +289,16 @@ if [ -d "${PROMPTS_SRC}" ]; then
         fi
     fi
 
-    # 工作台（work-ui）中文默认 — 幂等补写：运行时 config 的 display.language
-    # 从 en 替换为 zh（已是 zh/其他值时不匹配即跳过，不影响用户手动改过的配置）。
-    if [ -f "${DATA_DIR}/config.yaml" ] && grep -q "^  language: en$" "${DATA_DIR}/config.yaml"; then
+    # 工作台（work-ui）中文默认 — 其 i18n 读运行时 config 的 display.language
+    # （模板保持与原版一致的 en）；幂等：已是 zh/其他值时不命中即跳过，不影响用户手动配置。
+    # CRLF 兼容：config.yaml 可能是 CRLF 行尾（Windows 构建产物带回车），若仍用行尾锚点
+    # `en$` 会匹配不到行尾的回车符而静默失效（v0.21.158 装完语言停在 en 即此因）。
+    # 改前缀匹配 `^  language: en`（仅命中 display 段两空格行首；voice 段四空格且值为空、
+    # 模型段值不同，均不误伤）；grep 用 [[:space:]] 兜住行尾的回车或换行，sed 不锚行尾、
+    # 原样保留回车，CRLF 与 LF 两种行尾都能幂等替换成功。
+    if [ -f "${DATA_DIR}/config.yaml" ] && grep -qE "^  language: en([[:space:]]|$)" "${DATA_DIR}/config.yaml"; then
         _lc_tmp="${DATA_DIR}/config.yaml.tmp"
-        if sed 's/^  language: en$/  language: zh/' "${DATA_DIR}/config.yaml" > "${_lc_tmp}"; then
+        if sed 's/^  language: en/  language: zh/' "${DATA_DIR}/config.yaml" > "${_lc_tmp}"; then
             mv "${_lc_tmp}" "${DATA_DIR}/config.yaml"
             log_msg "display.language preseeded to zh (work-ui Chinese, idempotent)"
         else
