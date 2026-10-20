@@ -20,6 +20,7 @@ import path from 'node:path';
 import { readFile, stat, mkdir } from 'node:fs/promises';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import WSClib from './_vendor/ws/wrapper.mjs';
 import { checkOfficialCoreRelease, parseCoreVersion } from './core-release.js';
 import { FeishuOnboarding } from './feishu-onboarding.mjs';
@@ -147,6 +148,11 @@ export function createNasAdminHost(options = {}) {
     return { utime, stime, rssMb, alive };
   }
   function hostResources() {
+    // 方案A（v159）：同时给「单核当量」与「整机口径」。右卡 FnNAS 系统监控用整机多核百分比
+    // （4 核 32% ≈ 1.28 核当量），与此处 total.cpuPercent（单核口径合计，可 >100%）不同基准，
+    // 并排易误读为"进程比机器还满"。核数用 availableParallelism（尊重 cgroup/容器限制，
+    // 比 os.cpus().length 更准），兜底 1，避免容器限制到 1 核时整机口径被放大。
+    const cores = Math.max(1, typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length);
     const targets = [
       { key: 'monitor', label: '宿主 monitor', pid: process.pid },
       { key: 'dashboard', label: 'Hermes 工作服务', pid: readPid(dashboardPidPath) },
@@ -157,7 +163,7 @@ export function createNasAdminHost(options = {}) {
     let totalCpu = 0, totalMem = 0;
     for (const t of targets) {
       const pid = t.pid;
-      const rec = { key: t.key, label: t.label, pid: pid || null, running: false, cpuPercent: 0, memoryMb: null };
+      const rec = { key: t.key, label: t.label, pid: pid || null, running: false, cpuPercent: 0, cpuPercentOfMachine: 0, memoryMb: null };
       if (pid) {
         const sample = readProcPid(pid);
         if (sample.alive) {
@@ -169,6 +175,7 @@ export function createNasAdminHost(options = {}) {
             const cpuTicks = Math.max(0, (sample.utime - prev.utime) + (sample.stime - prev.stime));
             rec.cpuPercent = Math.max(0, (cpuTicks / CLK_TCK) / wallDeltaS * 100);
           }
+          rec.cpuPercentOfMachine = Math.round((rec.cpuPercent / cores) * 10) / 10; // 相对整机容量（÷核数）
           resourceSamples.set(t.key, { pid, wall: now, utime: sample.utime, stime: sample.stime });
           totalCpu += rec.cpuPercent;
           totalMem += rec.memoryMb || 0;
@@ -178,9 +185,15 @@ export function createNasAdminHost(options = {}) {
     }
     return {
       updatedAt: now,
-      total: { running: processes.some(p => p.running), cpuPercent: Math.round(totalCpu * 10) / 10, memoryMb: totalMem },
+      total: {
+        running: processes.some(p => p.running),
+        cpuPercent: Math.round(totalCpu * 10) / 10, // 单核当量（多核可 >100%），历史字段保留
+        cpuPercentOfMachine: Math.round((totalCpu / cores) * 10) / 10, // 整机口径（0–100，÷核数），与系统监控同基准
+        cpuCores: cores,
+        memoryMb: totalMem,
+      },
       processes,
-      note: 'CPU 为采样间隔内的平均占用（相对单核，多核可 >100%）；内存为 RSS。',
+      note: 'CPU 单核当量（相对单核，多核可 >100%）；cpuPercentOfMachine 为相对整机容量（÷核数），与 FnNAS 系统监控同口径可直接对比；内存为 RSS。',
     };
   }
 

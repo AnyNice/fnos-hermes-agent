@@ -173,7 +173,15 @@ function metricValue(key: string): string {
     case 'cpu': {
       const running = (resources.value?.processes || []).filter((p: any) => p.running);
       if (!running.length) return '—';
-      return `${Number(resources.value?.total?.cpuPercent || 0).toFixed(1)}%`;
+      const t: any = resources.value?.total || {};
+      // 方案A：主数字用整机口径（÷核数，0–100），与右侧 FnNAS 系统监控同基准可直接对比；
+      // 旧版后端无 cpuPercentOfMachine 字段时，用 totalCpu÷核数 回退；核数未知则保留单核当量。
+      const cores = Number(t.cpuCores) || 0;
+      const val = typeof t.cpuPercentOfMachine === 'number'
+        ? t.cpuPercentOfMachine
+        : cores ? Number(t.cpuPercent || 0) / cores
+        : Number(t.cpuPercent || 0);
+      return `${val.toFixed(1)}%`;
     }
     case 'mem': {
       const running = (resources.value?.processes || []).filter((p: any) => p.running);
@@ -196,10 +204,10 @@ onBeforeUnmount(() => { clearInterval(resTimer); clearInterval(logTimer); window
     <div class="hero-head"><div class="hero-brand"><img class="app-icon" :src="iconUrl" alt="Hermes"/><div><div class="hero-title">Hermes Agent <n-tag :type="ready ? 'success' : 'default'" size="small" round :bordered="false">{{ stateText }}</n-tag></div><div class="version-line"><span>版本: {{ runtime.version?.version||runtime.version?.tag||'—' }}</span><span>| Commit: {{ commit }}</span><span>| Build: {{ build }}</span><span>|</span></div></div></div><n-button type="primary" size="large" tag="a" :href="workUrl(runtime.profile)" target="_blank" :disabled="!ready"><template #icon><n-icon :component="ExternalLink" /></template>进入 Hermes</n-button></div>
     <div class="metrics-settings-row"><n-button quaternary circle title="选择要展示的指标卡片（7 选 3–5）" @click="metricsModal = true" aria-label="自定义指标卡片"><n-icon :component="Settings" /></n-button></div>
     <div ref="metricsEl" class="metrics" :style="{ gridTemplateColumns: `repeat(${metricCols}, minmax(0, 1fr))` }">
-      <div v-for="(metricKey, mi) in metrics" :key="metricKey" :class="['metric-cell', dragHideKey === metricKey ? 'metric-cell-hidden' : '', isNarrow && metrics.length % 2 === 1 && mi === metrics.length - 1 ? 'metric-cell-span2' : '']" @pointerdown="onMetricPointerDown($event, metricKey)"><span class="metric-label">{{ metricLabel(metricKey) }}</span><strong>{{ metricValue(metricKey) }}</strong><span v-if="metricKey==='cpu'||metricKey==='mem'" class="metric-sub">Hermes 进程 · 3s 采样</span><div v-if="metricKey==='gateway'" class="metric-sub metric-gw-sub"><a class="gw-chip" href="#/messaging">配置机器人</a><button v-if="!gwRunning" class="gw-chip gw-chip-primary" type="button" :disabled="runtime.busy" @click="gatewayAction('start')">启动</button><button v-else class="gw-chip" type="button" :disabled="runtime.busy" @click="gatewayAction('stop')">停止</button><span v-if="!gwProviderReady" class="gw-hint">需模型支持</span></div></div>
+      <div v-for="(metricKey, mi) in metrics" :key="metricKey" :class="['metric-cell', dragHideKey === metricKey ? 'metric-cell-hidden' : '', isNarrow && metrics.length % 2 === 1 && mi === metrics.length - 1 ? 'metric-cell-span2' : '']" @pointerdown="onMetricPointerDown($event, metricKey)"><span class="metric-label">{{ metricLabel(metricKey) }}</span><strong>{{ metricValue(metricKey) }}</strong><span v-if="metricKey==='cpu'" class="metric-sub">Hermes 进程 · 整机口径{{ resources?.total?.cpuCores ? ' · ' + resources.total.cpuCores + ' 核' : '' }} · 3s 采样</span><span v-else-if="metricKey==='mem'" class="metric-sub">Hermes 进程 · RSS · 3s 采样</span><div v-if="metricKey==='gateway'" class="metric-sub metric-gw-sub"><a class="gw-chip" href="#/messaging">配置机器人</a><button v-if="!gwRunning" class="gw-chip gw-chip-primary" type="button" :disabled="runtime.busy" @click="gatewayAction('start')">启动</button><button v-else class="gw-chip" type="button" :disabled="runtime.busy" @click="gatewayAction('stop')">停止</button><span v-if="!gwProviderReady" class="gw-hint">需模型支持</span></div></div>
     </div>
     <div v-if="dragGhost" class="metric-ghost" :style="{ left: dragGhost.x + 'px', top: dragGhost.y + 'px', width: dragGhost.w + 'px', height: dragGhost.h + 'px' }"><span class="metric-label">{{ metricLabel(dragGhost.key) }}</span><strong>{{ metricValue(dragGhost.key) }}</strong></div>
-    <n-modal v-model:show="metricsModal" preset="card" title="自定义指标卡片" style="width:380px;max-width:calc(100vw - 32px)"><p class="muted mb">选择概览顶部展示哪些卡片（3–5 张），选择与顺序都保存在本设备；顶部卡片可直接长按/拖动调整顺序。CPU / 内存为 Hermes 相关进程（宿主 monitor、工作服务、通讯网关）的实际占用，每 3 秒采样。</p><div class="metrics-picker"><n-checkbox v-for="def in METRIC_DEFS" :key="def.key" :checked="metrics.includes(def.key)" @update:checked="toggleMetric(def.key)">{{ def.label }}</n-checkbox></div></n-modal>
+    <n-modal v-model:show="metricsModal" preset="card" title="自定义指标卡片" style="width:380px;max-width:calc(100vw - 32px)"><p class="muted mb">选择概览顶部展示哪些卡片（3–5 张），选择与顺序都保存在本设备；顶部卡片可直接长按/拖动调整顺序。CPU 显示为 Hermes 相关进程（宿主 monitor、工作服务、通讯网关）合计占用的<strong>整机容量百分比</strong>（已按核数归一化，与右侧系统监控同基准、0–100），每 3 秒采样；内存为 RSS。</p><div class="metrics-picker"><n-checkbox v-for="def in METRIC_DEFS" :key="def.key" :checked="metrics.includes(def.key)" @update:checked="toggleMetric(def.key)">{{ def.label }}</n-checkbox></div></n-modal>
   </n-card>
   <section class="section-title"><h2>运行管理</h2><span>点击图标即可操作 · Admin 在工作服务停止后仍可访问</span></section>
   <div class="control-grid">
