@@ -39,6 +39,20 @@ for (const name of ['package.json', 'package-lock.json', 'apps/desktop', 'apps/s
   });
 }
 await cp(path.join(root, 'app/browser'), path.join(desktop, 'fnos-browser'), { recursive: true });
+// fnos 壳适配（不碰 pinned 上游 hermes-src 源树，package-fpk 的 commit 校验照过）：
+// 在 disposable staging 副本里把 gateway RPC 默认超时 30s 放宽到 60s，
+// 避免 NAS 反代冷探测（首启可达性检查、网关刚重启、叠 CF 隧道抖动）下，
+// 工作台入口先于宿主 60s 天花板被 30s 砍掉、弹「请求超时」。
+{
+  const _cp = path.join(desktop, 'src/api/client.ts');
+  const _cs = await readFile(_cp, 'utf8').catch(() => null);
+  if (_cs && _cs.includes('const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000')) {
+    await writeFile(_cp, _cs.replace('const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000', 'const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 60_000'));
+    console.log('patched staging client.ts: gateway RPC timeout 30s -> 60s (shell adaptation, upstream tree untouched)');
+  } else {
+    console.warn('WARN: staging client.ts missing or 30s anchor not found, work-ui keeps 30s');
+  }
+}
 await writeFile(path.join(desktop, 'vite.browser.config.ts'), `
 import upstream from './vite.config.ts'
 import { mergeConfig } from 'vite'
