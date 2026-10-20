@@ -4374,7 +4374,10 @@ function _restoreProvidersState(){
     if (existsSync(statePath)) return; // 正常情况：文件存在，无需重建
     const yamlPath = `${DATA_DIR}/config.yaml`;
     if (!existsSync(yamlPath)) return; // 全新安装无配置，不重建
-    const yml = readFileSync(yamlPath, "utf8");
+    // CRLF 归一化：fnOS 上 config.yaml 可能是 CRLF 行尾（Windows 构建产物带回车），
+    // 下方 ^ 锚点正则按 LF 假设，不归一化则 CRLF 文件静默不命中（v0.21.158 线上
+    // providers-state.yaml 从未重建、网关被启动预检拒启动即此因）。先归一化再跑原正则。
+    const yml = readFileSync(yamlPath, "utf8").replace(/\r\n/g, "\n");
     if (!/^providers:/m.test(yml)) return; // config.yaml 无 providers 段
     // 提取 providers 块（到下一个顶层键或文件结尾）
     const blockMatch = yml.match(/^providers:\n([\s\S]*?)(?=\n[a-zA-Z_][a-zA-Z0-9_-]*:|$)/m);
@@ -11000,7 +11003,7 @@ function maybeAutoStartServices() {
       try {
         const cfgPath = `${DATA_DIR}/config.yaml`;
         if (existsSync(cfgPath)) {
-          const yml = readFileSync(cfgPath, "utf8");
+          const yml = readFileSync(cfgPath, "utf8").replace(/\r\n/g, "\n"); // CRLF 归一化：fnOS 上 config.yaml 可能带 Windows 行尾，^ 锚点正则需归一化后再跑
           // 块级解析：只取 model: 块内的第一个 provider: 行（157 的 ^model:\s*\n\s+provider:\s*(\S+)
           // 用 \s* 跨行匹配，会把嵌套块子键误抓进来，如日志里的"真实 provider（default:）"垃圾值）
           const blockMatch = yml.match(/^model:[ \t]*\n((?:[ \t]+\S[^\n]*\n)*)/m);
