@@ -321,17 +321,14 @@ export function createNasAdminHost(options = {}) {
       if (pat) headers.Authorization = `Bearer ${pat}`;
       return headers;
     };
-    // 双保险 fallback（对齐原版）：先 releases?per_page=1（数组头），失败退 releases/latest
+    // 取最新 release：按 published_at 倒序（对齐上游 fetchLatestPublishedRelease，防拉到重建旧版）；
+    // 网络抖动/限流拿不到时兜底退 releases/latest（双保险，对齐原版健壮性）。
     let data = null;
     try {
-      let r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases?per_page=1`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
-      if (r.ok) {
-        const list = await r.json();
-        data = Array.isArray(list) ? (list[0] || null) : null;
-      }
+      data = (await fetchLatestPublishedRelease(ghHeaders())).data;
       if (!data) {
-        r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases/latest`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
-        if (r.ok) data = await r.json();
+        const lr = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases/latest`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
+        if (lr.ok) data = await lr.json();
       }
       if (data && data.tag_name) {
         const latest = String(data.tag_name).replace(/^fnos-hermes-agent_v|^v/, '').trim();
@@ -349,12 +346,31 @@ export function createNasAdminHost(options = {}) {
   }
 
   // ── GitHub PAT（落盘 var/github_pat 0600；查 release 时带 Bearer 绕过未认证 60/h 限流）──
+  // PAT 三级优先级（对齐上游 githubPatDefault 设计）：env > 落盘 var/github_pat（用户手填 0600）> 构建注入默认值。
+  // 默认值显式空串（保留 ?? 真值语义）——源码零 PAT 字面量：避免 GitHub Push Protection 拦截 + 随公开 Release 资产泄露；
+  // 需要内置 PAT 时走构建/环境注入，不在 git 里写字面量。
   function getGitHubPAT() {
     const fromEnv = String(process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || '').trim();
     if (fromEnv) return fromEnv;
     try { if (existsSync(githubPatFile)) return readFileSync(githubPatFile, 'utf8').trim(); } catch {}
-    return '';
+    return String(options.githubPatDefault ?? '');
   }
+
+  // 取「最新发布」release：按 published_at 倒序（而非 per_page=1 的 created_at 倒序——
+  // 重建过的旧 release 会排在前面导致热更拉到旧版本，对齐上游 fetchLatestPublishedRelease）。
+  // 仅走 api.github.com 列表接口；调用方保留 releases/latest 兜底双保险（网络抖动不再整条报错）。
+  async function fetchLatestPublishedRelease(headers) {
+    const r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases?per_page=30`, {
+      signal: AbortSignal.timeout(15000), headers,
+    });
+    if (!r.ok) return { data: null, status: r.status };
+    const list = await r.json();
+    const published = (Array.isArray(list) ? list : []).filter(x => !x.draft && x.published_at);
+    if (!published.length) return { data: null, status: r.status };
+    published.sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
+    return { data: published[0], status: r.status };
+  }
+
   async function saveGitHubPAT(pat) {
     const value = String(pat || '').trim();
     if (value) {
@@ -364,7 +380,7 @@ export function createNasAdminHost(options = {}) {
     try { if (existsSync(githubPatFile)) unlinkSync(githubPatFile); } catch {}
     return { ok: true, saved: false };
   }
-  const patState = () => ({ hasPat: !!getGitHubPAT(), source: String(process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || '').trim() ? 'env' : (existsSync(githubPatFile) ? 'file' : 'none') });
+  const patState = () => ({ hasPat: !!getGitHubPAT(), source: String(process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || '').trim() ? 'env' : (existsSync(githubPatFile) ? 'file' : (options.githubPatDefault ? 'builtin' : 'none')) });
 
   // ── 取「最新发布」的 FPK 资产（不比较版本，只拿下载直链）——供 update/download 服务端代下 ──
   async function latestFpkAsset() {
@@ -376,11 +392,10 @@ export function createNasAdminHost(options = {}) {
     };
     let data = null;
     try {
-      let r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases?per_page=1`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
-      if (r.ok) { const list = await r.json(); data = Array.isArray(list) ? (list[0] || null) : null; }
+      data = (await fetchLatestPublishedRelease(ghHeaders())).data;
       if (!data) {
-        r = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases/latest`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
-        if (r.ok) data = await r.json();
+        const lr = await fetchRelease(`https://api.github.com/repos/${githubRepo}/releases/latest`, { headers: ghHeaders(), signal: AbortSignal.timeout(15000) });
+        if (lr.ok) data = await lr.json();
       }
     } catch (e) { return { error: `查询最新 Release 失败：${e.message}` }; }
     const asset = (data?.assets || []).find(a => /\.fpk$/i.test(a?.name || ''));
@@ -410,10 +425,13 @@ export function createNasAdminHost(options = {}) {
   async function downloadFpkStream() {
     const asset = await latestFpkAsset();
     if (asset.error) return json(null, 404, { error: asset.error });
+    // 通道顺序（首成功即用，对齐上游 ghfast.top 优先策略，大陆实测 ~2.6MB/s；中继失败/回 HTML 预览页时由 gzip 魔数校验自动切下一通道）
+    const ghfastBase = (process.env.HERMES_GHFST || 'https://ghfast.top/').replace(/\/+$/, '');
     const ghproxyBase = (process.env.HERMES_GHPROXY || 'https://ghproxy.net/').replace(/\/+$/, '');
     const rel = asset.url.replace(/^https?:\/\//, ''); // github.com/AnyNice/.../releases/download/...
     const channels = [
-      { label: 'GitHub 加速中继', url: `${ghproxyBase}/${rel}`, timeoutMs: 180000 },
+      { label: 'ghfast.top 加速中继', url: `${ghfastBase}/${rel}`, timeoutMs: 900000 },
+      { label: 'ghproxy 加速中继', url: `${ghproxyBase}/${rel}`, timeoutMs: 180000 },
       { label: 'GitHub 直连', url: asset.url, timeoutMs: 600000 },
     ];
     let lastErr = '';

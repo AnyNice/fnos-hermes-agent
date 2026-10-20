@@ -364,8 +364,8 @@ test('GitHub PAT: save/clear 0600 落盘 + check 带 Authorization + releases fa
       return Response.json({ tag_name: 'v0.23.0', prerelease: false, draft: false, html_url: 'https://github.com/NousResearch/hermes-agent/releases/tag/v0.23.0', published_at: '2026-06-01' });
     }
     if (u.includes('AnyNice/fnos-hermes-agent')) {
-      // per_page=1 返回空数组 → 触发 releases/latest fallback（双保险）
-      if (u.includes('per_page=1')) return Response.json([]);
+      // per_page=30 返回空数组 → 触发 releases/latest fallback（双保险，对齐上游 fetchLatestPublishedRelease）
+      if (u.includes('per_page=30')) return Response.json([]);
       return Response.json({ tag_name: 'fnos-hermes-agent_v0.19.0', html_url: 'https://github.com/AnyNice/fnos-hermes-agent/releases/tag/v0.19.0', body: '新增双入口 + 微信/QQ 扫码', published_at: '2026-10-01', assets: [{ name: 'hermes-agent_0.19.0.fpk', browser_download_url: 'https://github.com/AnyNice/fnos-hermes-agent/releases/download/v0.19.0/hermes-agent_0.19.0.fpk' }] });
     }
     return Response.json({});
@@ -382,7 +382,7 @@ test('GitHub PAT: save/clear 0600 落盘 + check 带 Authorization + releases fa
     githubRepo: 'AnyNice/fnos-hermes-agent', githubPatFile: patFile,
   });
   try {
-    // 1) 初始无 PAT → check 里带 null Authorization，fallback 已生效（per_page=1 空 → latest）
+    // 1) 初始无 PAT → check 里带 null Authorization，fallback 已生效（per_page=30 空 → latest）
     let r = await host.handle(new Request('http://nas/admin/api/host/update/check'));
     let body = await r.json();
     assert.equal(r.status, 200);
@@ -400,10 +400,10 @@ test('GitHub PAT: save/clear 0600 落盘 + check 带 Authorization + releases fa
     assert.match(body.app.body, /双入口/);
     assert.match(body.app.downloadUrl, /hermes-agent_0\.19\.0\.fpk/);
     assert.equal(body.app.error, undefined);
-    // fallback 双保险：AnyNice 域名先打 per_page=1，空再打 latest
+    // fallback 双保险：AnyNice 域名先打 per_page=30（published_at 倒序取最新），空再打 latest
     const anyNice = calls.filter(c => c.url.includes('AnyNice'));
-    assert.ok(anyNice.length >= 2, '应触发 fallback（per_page=1 + latest 两次）');
-    assert.match(anyNice[0].url, /per_page=1/);
+    assert.ok(anyNice.length >= 2, '应触发 fallback（per_page=30 + latest 两次）');
+    assert.match(anyNice[0].url, /per_page=30/);
     assert.match(anyNice[1].url, /releases\/latest/);
     assert.equal(anyNice[0].auth, null); // 无 PAT 不带 Authorization
     assert.equal(anyNice[1].auth, null);
@@ -447,11 +447,17 @@ test('update/download: 多通道服务端代下 + 首块 gzip 头校验 + 流式
   const ghMock = async (url, init = {}) => {
     const u = String(url);
     calls.push(u);
-    // download 资产 URL 也含「AnyNice/fnos-hermes-agent/releases」子串，必须先匹配 download
-    if (u.includes('/releases/download/')) {
+    // 匹配顺序关键：ghfast.top / ghproxy.net 的中继 URL 也含「/releases/download/」子串（前缀 relay/github.com/...），
+    // 必须先判「纯 GitHub 直连」= https://github.com/ 开头（无中继前缀），否则中继请求被直连分支抢答、后续通道永不触发
+    if (u.startsWith('https://github.com/')) {
+      // GitHub 直连（通道③）：gzip tar 头 + 载荷
       // GitHub 直连：gzip tar 头 + 载荷
       const payload = Buffer.concat([Buffer.from([0x1f, 0x8b, 0x08, 0x00]), Buffer.from('FAKE-FPK-PAYLOAD')]);
       return new Response(payload, { status: 200, headers: { 'content-length': String(payload.length) } });
+    }
+    if (u.includes('ghfast.top')) {
+      // ghfast.top（首选通道）也回 HTML 预览（模拟内容校验拦截）→ 切下一通道
+      return new Response('<html>preview</html>', { status: 200, headers: { 'content-type': 'text/html' } });
     }
     if (u.includes('ghproxy.net')) {
       // 中继返回 HTML 预览页（非 gzip 头）→ 内容校验应拦截并切下一通道
@@ -475,8 +481,9 @@ test('update/download: 多通道服务端代下 + 首块 gzip 头校验 + 流式
     assert.equal(r.status, 200);
     assert.match(r.headers.get('content-disposition') || '', /fnos-hermes-agent_v0\.21\.155\.fpk/);
     assert.equal(r.headers.get('x-fpk-tag'), '0.21.155');
-    // 中继通道被试过一次（拦截在内容校验层），随后走 GitHub 直连
-    assert.ok(calls.some(c => c.includes('ghproxy.net')), '应尝试过加速中继');
+    // 三个加速/直连通道依次被试（ghfast.top → ghproxy.net 均拦截在内容校验层），随后走 GitHub 直连
+    assert.ok(calls.some(c => c.includes('ghfast.top')), '首选通道 ghfast.top 应被尝试');
+    assert.ok(calls.some(c => c.includes('ghproxy.net')), '加速中继 ghproxy.net 应被尝试');
     assert.ok(calls.some(c => c.includes('/releases/download/')), '中继内容非 FPK 后应切 GitHub 直连');
     const bytes = Buffer.from(await r.arrayBuffer());
     assert.equal(bytes[0], 0x1f);
