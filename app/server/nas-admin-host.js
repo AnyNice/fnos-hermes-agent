@@ -458,7 +458,22 @@ export function createNasAdminHost(options = {}) {
         };
         const cl = up.headers.get('content-length');
         if (cl) headers['Content-Length'] = cl;
-        return new Response(streamConcat(first, reader), { status: 200, headers });
+        // v0.21.165：回传闭环日志——之前只打「开始」、完成/中断无痕，代下慢无法回溯（排障数据缺口）。
+        // 计数字节 + 耗时 + 均速；客户端提前断开时 for-await 被取消，finally 记「中断」，区分完整/中断。
+        const t0 = Date.now();
+        let sent = 0;
+        const totalBytes = cl ? Number(cl) : 0;
+        async function* withDoneLog() {
+          try {
+            for await (const chunk of streamConcat(first, reader)) { sent += chunk.length; yield chunk; }
+          } finally {
+            const sec = Math.max(0.001, (Date.now() - t0) / 1000);
+            const complete = totalBytes ? sent >= totalBytes * 0.999 : null; // null=无 Content-Length，无法判定完整性
+            const state = complete === null ? `结束（无 Content-Length，共回传 ${(sent / 1048576).toFixed(1)} MB）` : complete ? '流式回传完成' : '流式回传中断（客户端断开）';
+            log(`[app-download] ${asset.name} ${state}，耗时 ${sec.toFixed(0)}s，均速 ${(sent / 1048576 / sec).toFixed(2)} MB/s`);
+          }
+        }
+        return new Response(withDoneLog(), { status: 200, headers });
       } catch (e) {
         lastErr = `${ch.label} 异常：${e?.message || e}`;
       }

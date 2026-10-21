@@ -8,8 +8,16 @@ const runtime = useRuntime(); const message = useMessage(); const dialog = useDi
 const iconUrl = new URL('./hermes-icon.png', document.baseURI).href;
 const ready = computed(() => runtime.status?.backend.state === 'ready');
 const stateText = computed(() => ({ ready: '运行中', starting: '启动中', stopped: '已停止', unavailable: '不可用' }[runtime.status?.backend.state as string] || '正在检查'));
+const fpkVersion = computed(() => runtime.version?.fpkVersion || '—');
+const coreVersion = computed(() => {
+  const v = runtime.version?.version;
+  return (v && v !== 'unknown') ? v : (runtime.version?.tag || '').replace(/^v/, '') || '—';
+});
 const commit = computed(() => String(runtime.version?.commit || '—').slice(0, 8));
-const build = computed(() => runtime.version?.builtAt ? new Date(runtime.version.builtAt).toLocaleString('zh-CN', { hour12: false }) : '—');
+const build = computed(() => {
+  const ts = runtime.version?.builtAt || runtime.version?.commitDate;
+  return ts ? new Date(ts).toLocaleString('zh-CN', { hour12: false }) : '—';
+});
 // 通讯网关状态（由 host 探测：读 gateway.pid + 服务商配置就绪）
 const gw = computed(() => runtime.status?.gateway || {});
 const gwRunning = computed(() => gw.value.state === 'running');
