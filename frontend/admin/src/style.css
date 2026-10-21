@@ -65,6 +65,14 @@
 .mobile-scope{display:none}
 @media(min-width:1640px){main{margin-right:auto}}
 @media(max-width:1050px){main{padding:28px 25px}.sidebar{width:215px}main{margin-left:215px}.control-grid,.quick-grid{gap:12px}.hero-card>.n-card__content{padding:23px}.hero-title{font-size:18px}.control-grid .n-card__content{padding:20px}}
+/* 163：运行管理三卡瘦身（桌面）——图标 48→32px、描述去 min-height、padding/间距收紧 */
+.control-grid{gap:14px}
+.control-grid>.n-card .n-card__content{padding:16px 18px}
+.control-grid .svc-btn{width:32px;height:32px;font-size:16px;border-radius:9px;margin-bottom:9px}
+.control-grid .svc-btn .n-icon{font-size:16px}
+.control-grid h3{font-size:14px;margin-bottom:5px}
+.control-grid p{font-size:11px;min-height:0;margin-bottom:0;line-height:1.55}
+.gw-hint-ok{color:#27b47e}
 @media(max-width:760px){.sidebar{display:none}main{margin-left:0;padding:18px 14px 88px}.page-header{margin-bottom:18px;gap:10px;flex-wrap:wrap}h1{font-size:20px}.page-header p{font-size:11px}.hero-head{align-items:stretch;flex-direction:column;gap:16px}.hero-brand{gap:12px}.hero-title{font-size:18px}.app-mark{height:52px;width:52px;font-size:32px}.hero-brand p{font-size:11px}.metrics{grid-template-columns:repeat(2,1fr);gap:9px}.metrics .metric-cell-span2{grid-column:span 2}
 .metrics>div:last-child{grid-column:span 2}.control-grid,.quick-grid{grid-template-columns:1fr}.control-grid .n-card__content{display:grid;grid-template-columns:42px 1fr auto;gap:0 12px;align-items:center}.control-icon{grid-row:span 2;margin:0}.control-grid h3{font-size:14px;margin:0}.control-grid p{grid-column:2;font-size:11px;margin:4px 0 0;min-height:auto}.control-grid .n-button{grid-column:3;grid-row:1 / span 2}.section-title span{display:none}.workspace-grid,.settings-fields{grid-template-columns:1fr}.split{align-items:flex-start;flex-direction:column}.resource-description{max-width:100%}.toolbar{flex-wrap:wrap}.about-grid{grid-template-columns:80px 1fr}.hero-card>.n-card__content{padding:20px}.mobile-tabbar{display:flex}.mobile-sheet-backdrop{display:block}.mobile-sheet{display:block;transform:translateY(0)}.log-filter-grid{grid-template-columns:1fr}.log-search{grid-column:auto}.profile-row>div{align-items:flex-start;flex-direction:column;gap:4px}}
 @media(max-width:760px){.mobile-scope{display:flex;align-items:center;gap:12px;margin-bottom:18px;color:var(--muted);font-size:12px}.mobile-scope .n-select{flex:1;min-width:0}}

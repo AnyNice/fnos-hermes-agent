@@ -903,8 +903,19 @@ try {
 function readPidSync(path) {
   try { return Number(readFileSync(path, "utf8").trim()); } catch { return null; }
 }
+// B2 修复（v0.21.163）：僵尸进程感知。kill(pid,0) 对僵尸仍返回存活（进程表项未回收），
+// 但 /proc/<pid>/stat 第 3 字段 state='Z'。据此判「真活」，避免 readPid 误判 already_running、
+// gateway/dashboard 挂死后 spawnHermes 拒绝重启（历史症状：网关总 502）。
+function isZombie(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")"); // comm 字段可含空格/括号，取最后一个 ')' 之后
+    if (close < 0 || close + 2 >= stat.length) return false;
+    return stat[close + 2] === "Z";
+  } catch { return false; } // 读不到 /proc（权限/时机）→ 保守按非僵尸
+}
 function pidAliveSync(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try { process.kill(pid, 0); return !isZombie(pid); } catch { return false; }
 }
 try {
   // spawnSync 已在顶部从 child_process 导入。
@@ -1048,6 +1059,9 @@ function defaultConfig() {
 
 function initChatData() {
   mkdirSync(CHAT_DIR, { recursive: true });
+  // B8 修复（v0.21.163）：chat 目录含明文 API key（chat/config.json 与 providers 凭据），
+  // 收紧为仅属主可读写（0700），避免同机其他用户/应用读取。幂等：每次 monitor 启动都校正权限漂移。
+  try { chmodSync(CHAT_DIR, 0o700); } catch {}
   mkdirSync(SESSIONS_DIR, { recursive: true });
   mkdirSync(TMP_DIR, { recursive: true });
   mkdirSync(UPLOAD_IMG_DIR, { recursive: true });
@@ -1062,6 +1076,8 @@ function initChatData() {
       needsReset = true;
     }
   }
+  // B8：CONFIG_FILE 无论是否 reset，存在即确保 0600（防 755 漂移，key 不外泄）
+  if (existsSync(CONFIG_FILE)) { try { chmodSync(CONFIG_FILE, 0o600); } catch {} }
   if (needsReset) {
     try {
       // 若文件已存在但不可写（权限漂移），尝试放宽再写入
@@ -3004,7 +3020,7 @@ function log(...args) {
 }
 
 function pidAlive(pid) {
-  try { process.kill(pid, 0); return true; }
+  try { process.kill(pid, 0); return !isZombie(pid); }
   catch { return false; }
 }
 
@@ -3239,7 +3255,10 @@ function spawnHermes(name, pidPath, args) {
     GATEWAY_ALLOW_ALL_USERS: "true",
     API_SERVER_ENABLED: "true",
     API_SERVER_PORT:   String(GATEWAY_PORT),
-    API_SERVER_HOST:    "0.0.0.0",
+    // B1（v0.21.163）：API 绑定主机可配置。默认 0.0.0.0（隧道/外网可达）；
+    // 安全收紧（不需外网访问 Hermes API 时）设 HERMES_API_BIND=127.0.0.1，
+    // 杜绝「局域网任意主机驱动全量 terminal/文件操作」的攻击面（security_audit 告警项）。
+    API_SERVER_HOST:    process.env.HERMES_API_BIND || "0.0.0.0",
     API_SERVER_KEY:     MONITOR_TOKEN,
     HERMES_YOLO_MODE:   "1",
     LITELLM_REQUEST_TIMEOUT: "600",

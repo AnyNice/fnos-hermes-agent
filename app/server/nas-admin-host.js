@@ -18,7 +18,7 @@
 
 import path from 'node:path';
 import { readFile, stat, mkdir } from 'node:fs/promises';
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import WSClib from './_vendor/ws/wrapper.mjs';
@@ -676,6 +676,30 @@ export function createNasAdminHost(options = {}) {
           gateway: {
             state: gatewayRunning ? 'running' : 'stopped',
             providerReady,
+            // 是否已配置至少一个机器人通道（FEISHU/WEIXIN/QQ 的 ALLOW_ALL_USERS 或凭证 env 已落盘）。
+            // 概览页「配置机器人」引导 + 停止按钮据此在配好后自动隐藏（配好=机器人就绪）。
+            botsConfigured: (function () {
+              // 机器人通道凭证落盘在 profile-scope 的 .env：default → dataDir/.env，命名 profile → dataDir/profiles/<name>/.env。
+              // 扫两者，任一平台（feishu/weixin/qqbot）有 ALLOW_ALL_USERS=true 或专属凭据即视为已配置。
+              const files = [path.join(dataDir, '.env')];
+              try {
+                const pdir = path.join(dataDir, 'profiles');
+                for (const d of readdirSync(pdir)) files.push(path.join(pdir, d, '.env'));
+              } catch {}
+              // some() 短路只回布尔不回值——必须逐文件取第一个非空匹配（回字符串）
+              const firstDef = (k) => {
+                for (const fp of files) {
+                  try { const m = readFileSync(fp, 'utf8').match(new RegExp('^' + k + '\\s*=\\s*(.+)$', 'm')); if (m && m[1].trim()) return m[1].trim(); } catch {}
+                }
+                return '';
+              };
+              return ['feishu', 'weixin', 'qqbot'].some(plat => {
+                const U = plat.toUpperCase();
+                const all = firstDef(U + '_ALLOW_ALL_USERS');
+                const cred = firstDef(plat === 'feishu' ? 'FEISHU_APP_ID' : plat === 'weixin' ? 'WEIXIN_ACCOUNT_ID' : 'QQ_APP_ID');
+                return all === 'true' || !!cred;
+              });
+            })(),
             detail: gatewayRunning
               ? '通讯网关运行中。'
               : providerReady

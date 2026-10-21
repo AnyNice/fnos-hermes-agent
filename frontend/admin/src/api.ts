@@ -34,9 +34,21 @@ export async function request<T = any>(path: string, options: RequestInit = {}):
   return value as T;
 }
 
+// 同飞行去重（v0.21.163）：切页/并发时，完全相同的 GET（同 URL+profile）在飞期内合并为一次真实请求，
+// 消除「每次切换功能页都重新拉一遍 Hermes 数据」的重复与慢（多个请求同时打到同一 dashboard 端点排队）。
+const _inflight = new Map<string, Promise<unknown>>();
 export function native<T = any>(path: string, profile: string, method = 'GET', body?: unknown): Promise<T> {
   const url = new URL(`api/native${path}`, hostRoot);
   url.searchParams.set('profile', profile);
+  // 仅 GET 且无 body 可去重（幂等读）；POST/PUT 有副作用，绝不合并。
+  if (method === 'GET' && body === undefined) {
+    const key = url.href;
+    const existing = _inflight.get(key);
+    if (existing) return existing as Promise<T>;
+    const p = request<T>(url.href, { method }).finally(() => { _inflight.delete(key); });
+    _inflight.set(key, p);
+    return p;
+  }
   return request<T>(url.href, { method, ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
 }
 

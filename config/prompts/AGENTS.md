@@ -54,6 +54,10 @@ SOUL.md → AGENTS.md → 对应 skills 文件
 
 数据分布在两个目录：
 
+> **卷号以实际挂载为准**：下方 `/vol1/@apphome/...`、`/vol1/@appdata/...` 是**示例卷号**，
+> fnOS 按存储池把应用数据挂到某卷，实际可能是 `/vol2/` 等。操作前用 `ls /vol*` 或环境变量
+> `$TRIM_PKGHOME`/`$TRIM_PKGVAR`（回调时注入真实路径）确认，勿假设固定 `/vol1/`。
+
 **`$TRIM_PKGHOME/data`（`/vol1/@apphome/hermes-agent/data/`）** — 应用核心数据：
 
 | 目录/文件 | 用途 |

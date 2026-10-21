@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 import { NButton, NCard, NInput, NSelect, NSwitch, NTag } from 'naive-ui';
 import { native, request } from '../api';
 import { useRuntime } from '../stores/runtime';
@@ -122,8 +122,10 @@ watch([sourceGroups, source], () => {
   const values = sourceGroups.value.flatMap(g => g.children.map(c => c.value));
   if (!values.includes(source.value)) source.value = 'all';
 });
-onMounted(() => { void refresh(); timer = setInterval(() => { if (live.value) void refresh(); }, 2000); });
-onBeforeUnmount(() => { disposed = true; clearInterval(timer); clearTimeout(debounce); });
+// KeepAlive 下切页不卸载（onBeforeUnmount 不触发），定时器须随激活态停启，避免后台多页并行走轮询。
+onActivated(() => { void refresh(); timer = setInterval(() => { if (live.value) void refresh(); }, 2000); });
+onDeactivated(() => { clearInterval(timer); clearTimeout(debounce); });
+onBeforeUnmount(() => { disposed = true; });
 </script>
 <template>
   <div class="toolbar"><div class="inline"><label class="inline">实时刷新 <n-switch v-model:value="live" size="small" /></label><label class="inline">自动滚动 <n-switch v-model:value="autoScroll" size="small" /></label></div><n-button :disabled="!lines.length" @click="download">下载当前结果</n-button></div>

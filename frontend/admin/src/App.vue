@@ -69,13 +69,15 @@ const themeOverrides = { common: { primaryColor: '#1669ff', primaryColorHover: '
           <header class="page-header"><div><h1>{{ page.label }}</h1><p>{{ page.hint }}</p></div><n-button v-if="page.id !== 'overview'" tag="a" :href="workUrl(runtime.profile)" target="_blank" :disabled="runtime.status?.backend.state !== 'ready'"><template #icon><n-icon :component="ExternalLink" /></template>进入 Hermes</n-button></header>
           <div class="mobile-scope"><span>Profile</span><n-select :value="runtime.profile" @update:value="selectProfile" :options="runtime.profiles.length?runtime.profiles.map(p=>({label:p.display_name||p.name,value:p.name})):[{label:'default',value:'default'}]" /><button class="theme-toggle" @click="toggleTheme" aria-label="切换主题"><n-icon :component="dark?Sun:Moon" size="18" /></button></div>
           <n-alert v-if="runtime.error" type="error" class="mb" :bordered="false">{{ runtime.error }}</n-alert>
-          <Overview v-if="page.id === 'overview'" />
-          <Workspace v-else-if="page.id === 'workspace'" />
-          <Models v-else-if="page.id === 'models'" />
-          <Messaging v-else-if="page.id === 'messaging'" />
-          <SettingsPage v-else-if="page.id === 'settings'" />
-          <Logs v-else-if="page.id === 'logs'" />
-          <NativePage v-else :key="page.id" :kind="page.id" />
+          <KeepAlive :max="10">
+            <Overview v-if="page.id === 'overview'" key="overview" />
+            <Workspace v-else-if="page.id === 'workspace'" key="workspace" />
+            <Models v-else-if="page.id === 'models'" key="models" />
+            <Messaging v-else-if="page.id === 'messaging'" key="messaging" />
+            <SettingsPage v-else-if="page.id === 'settings'" key="settings" />
+            <Logs v-else-if="page.id === 'logs'" key="logs" />
+            <NativePage v-else :key="page.id" :kind="page.id" />
+          </KeepAlive>
           <footer>Hermes Admin <span>·</span> 本机开发预览 <span>·</span> Hermes {{ runtime.version?.version || runtime.version?.tag || '—' }}</footer>
         </main>
 

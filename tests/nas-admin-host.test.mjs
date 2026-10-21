@@ -154,6 +154,26 @@ test('nas host serves both frontends and rejects path traversal', async t => {
   assert.equal(s.pid, 1234);
   assert.equal(s.gateway.state, 'running');
 
+  // ── gateway.botsConfigured：无 .env → false；写 FEISHU 凭据 → true（配好机器人后概览页自动隐藏配置引导）──
+  assert.equal(s.gateway.botsConfigured, false, '无 .env 时未配置机器人');
+  // 独立 dataDir：空目录 → false；写 FEISHU 凭据后 → true
+  const botsData = mkdtempSync(path.join(tmpdir(), 'nas-admin-bots-'));
+  const hostBots = createNasAdminHost({
+    appDir: repoRoot, dataDir: botsData,
+    uiRoot: path.join(repoRoot, 'app/admin-ui'), workRoot: path.join(repoRoot, 'app/work-ui'),
+    bootstrapFile: path.join(repoRoot, 'config/bootstrap/hermes-source.json'),
+    coreRoot: path.join(repoRoot, 'app/hermes-src'),
+    dashboardBind: '127.0.0.1', dashboardPort: port,
+    dashboardSessionToken: TOKEN, readPid: () => 1234,
+    proxyDashboard: fakeProxyDashboard(proxyCalls), log: () => {},
+  });
+  let st = await (await hostBots.handle(new Request('http://nas/admin/api/host/status'))).json();
+  assert.equal(st.gateway.botsConfigured, false, '空 dataDir 未配置机器人');
+  writeFileSync(path.join(botsData, '.env'), 'FEISHU_APP_ID=cli_test123\n');
+  st = await (await hostBots.handle(new Request('http://nas/admin/api/host/status'))).json();
+  assert.equal(st.gateway.botsConfigured, true, '写 FEISHU_APP_ID 后视为已配置机器人');
+  try { rmSync(botsData, { recursive: true, force: true }); } catch {}
+
   // ── api/host/version：核心版本 + 包版本 + 安装戳 ──
   const version = await (await host.handle(new Request('http://nas/admin/api/host/version'))).json();
   assert.equal(version.version, '0.22.2');
