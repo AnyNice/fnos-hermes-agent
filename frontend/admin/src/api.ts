@@ -30,7 +30,18 @@ export async function request<T = any>(path: string, options: RequestInit = {}):
     throw e;
   }
   const value = await response.json();
-  if (!response.ok) throw new Error(typeof value.detail === 'string' ? value.detail : value.error || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    const rawMsg = typeof value.detail === 'string' ? value.detail : value.error || `请求失败 (${response.status})`;
+    // 核心（dashboard）未就绪识别：502/503 且文案含 unavailable/不可用 → 打可识别标记。
+    // 首装冷启动（~1 分钟）窗口里用户操作配置页，native 反代 9219 尚未监听，monitor 回
+    // 502「Dashboard unavailable / 原生服务不可用」——此前被渲染成通用红 toast，误导用户
+    // 以为是配置填错。上层据此区分「核心初始化中」（可等待/自愈）与「真正写失败」（需排查）。
+    if ((response.status === 502 || response.status === 503) && /unavailable|不可用|not (yet )?available/i.test(rawMsg)) {
+      const e = new Error('核心服务尚未就绪（首次安装初始化中，约需 1 分钟）') as Error & { name: string; coreNotReady?: boolean };
+      e.name = 'CoreNotReady'; e.coreNotReady = true; throw e;
+    }
+    throw new Error(rawMsg);
+  }
   return value as T;
 }
 

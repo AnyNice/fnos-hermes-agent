@@ -13,6 +13,7 @@ import { CONNECTOR_CATALOG, getConnector, callConnectorTool, probeConnector } fr
 import { BUILTIN_EXPERTS_ALL } from "./experts-data.js";
 import { checkOfficialCoreRelease } from "./core-release.js";
 import { createNasAdminHost } from "./nas-admin-host.js";
+import { dedupeYamlKeyDups } from "./config-repair.mjs";
 
 // 加载 vendor 目录内置的 ws 库（Node.js 无内置 WebSocket 服务器）
 const _require = createRequire(import.meta.url);
@@ -4353,29 +4354,36 @@ function _repairConfigYaml(){
   try {
     const p = `${DATA_DIR}/config.yaml`;
     if (!existsSync(p)) return false;
-    let yml = readFileSync(p, "utf8");
-    const lines = yml.split("\n");
+    const raw = readFileSync(p, "utf8");
+    const isCRLF = raw.includes("\r\n");
+    let lines = raw.replace(/\r\n/g, "\n").split("\n");
+    // 修复1（既有）：紧随顶层键的顶格 "- item" 行 → 缩进 2 空格（等价保守写法，不删数据）
     const out = [];
-    let fixed = 0;
+    let fixedIndent = 0;
     for (let k = 0; k < lines.length; k++){
       const line = lines[k];
       if (/^[a-zA-Z_][a-zA-Z0-9_-]*:$/.test(line)){
         out.push(line);
-        // 只处理紧随顶层键后的顶格 "- item" 行：缩进修复，不删除、不跳过任何内容
-        let j = k + 1;
-        while (j < lines.length && /^-\s/.test(lines[j])) {
-          out.push("  " + lines[j]);
-          fixed++; j++;
-        }
-        k = j - 1;
+        let j2 = k + 1;
+        while (j2 < lines.length && /^-\s/.test(lines[j2])) { out.push("  " + lines[j2]); fixedIndent++; j2++; }
+        k = j2 - 1;
         continue;
       }
       out.push(line);
     }
-    if (fixed > 0){
-      try { writeFileSync(p + ".pre-repair.bak", yml, { mode: 0o644 }); } catch (e) {}
-      writeFileSync(p, out.join("\n"), { mode: 0o644 });
-      log(`[config-repair] config.yaml 已修复：${fixed} 行顶格列表项已缩进（原文件备份 .pre-repair.bak）`);
+    lines = out;
+    // 修复2（v0.21.164）：同父重复键去重（保留最后值）→ 打破核心「读失败即拒写」死锁
+    // （用户 config 第 736 行嵌套 supports_reasoning 重复 → ruamel 报 duplicate key → 每次保存被拒）
+    const dd = dedupeYamlKeyDups(lines);
+    lines = dd.lines;
+    const totalFixed = fixedIndent + dd.removed;
+    if (totalFixed > 0){
+      const text = lines.join(isCRLF ? "\r\n" : "\n");
+      // 仅首次备份原始脏状态（周期自愈不覆盖最初快照，保留最老现场供排查）
+      if (!existsSync(p + ".pre-repair.bak")) { try { writeFileSync(p + ".pre-repair.bak", raw, { mode: 0o644 }); } catch (e) {} }
+      writeFileSync(p, text, { mode: 0o644 });
+      const dedupDesc = dd.removed > 0 ? ` + 去重 ${dd.removed} 处同父重复键（${[...new Set(dd.keys)].join("、")}）` : '';
+      log(`[config-repair] config.yaml 已修复：${fixedIndent} 行顶格列表项缩进${dedupDesc}（原文件备份 .pre-repair.bak）`);
       return true;
     }
   } catch (e) { log("[config-repair] error: " + e.message); }
@@ -11132,6 +11140,15 @@ setInterval(() => {
 setInterval(() => {
   try { _syncChannelOverrides(); } catch (e) {}
 }, 60000);
+
+// v0.21.164：config.yaml 周期自愈（5 分钟一次，仅读+文本修复，开销可忽略）。
+// 场景：运行期任何来源（手动编辑/旧进程追加写）再次写坏 config（重复键/顶格列表），
+// 核心「读失败即拒写」保护会让用户保存模型/供应商全部失败、网关热加载解析失败「网关异常」。
+// 网关每次请求热加载 config.yaml（无需重启），修复后下一次请求即自动恢复；
+// 备份 .pre-repair.bak 只在首次修复时落盘（保留最老脏现场供排查）。
+setInterval(() => {
+  try { if (_repairConfigYaml()) log("[config-repair] 周期自愈：检测到 config.yaml 重复键/顶格损坏，已修复，网关下次请求自动生效"); } catch (e) {}
+}, 300000);
 
 // ─── 定时任务 Webhook 出站投递（monitor 侧实现，hermes 不支持出站 webhook）───
 function _readCronWebhooks() {
