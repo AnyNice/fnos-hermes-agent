@@ -19,6 +19,9 @@ const component = ref('all');
 const count = ref(200);
 const keyword = ref('');
 const hostNote = ref('');
+// v0.21.166：「最后更新」时间戳——2s 轮询是否真的在刷新可感知（后端 readLogs 每次全量读被
+// I/O 拖住时，时间戳不动比"看起来卡住"更能定位问题）。
+const lastUpdated = ref('');
 const availableSources = ref<string[]>([]);
 let timer: ReturnType<typeof setInterval>;
 let debounce: ReturnType<typeof setTimeout>;
@@ -72,6 +75,7 @@ function parseNative(raw: string[]) {
 async function refresh() {
   try {
     let rows: any[] = [];
+    let serverTs = 0;
     hostNote.value = '';
     if (isCore.value) {
       // 核心来源：经 Hermes 服务读取（服务端按 level/component/search 结构化过滤）
@@ -85,6 +89,7 @@ async function refresh() {
         if (keyword.value) params.set('search', keyword.value);
         const data: any = await native(`/api/logs?${params}`, runtime.profile);
         rows = parseNative(data.lines || []);
+        serverTs = data.serverTs || 0;
       }
     } else {
       // 磁盘来源：NAS 直接读盘（后端已按真实落盘过滤来源；level/component/keyword 服务端二次过滤）
@@ -93,9 +98,12 @@ async function refresh() {
       rows = data.lines || [];
       hostNote.value = data.note || '';
       availableSources.value = data.sources || [];
+      serverTs = data.serverTs || 0;
     }
     if (disposed) return;
     lines.value = rows; error.value = '';
+    // v0.21.166：记录「最后更新」——磁盘来源用后端 serverTs（真实服务端生成时刻），核心来源取本地完成时刻。
+    lastUpdated.value = new Date(serverTs || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
     if (autoScroll.value) await nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight; });
   } catch (e) { if (!disposed) error.value = (e as Error).message; }
   finally { if (!disposed) loading.value = false; }
@@ -142,6 +150,7 @@ onBeforeUnmount(() => { disposed = true; });
       <span v-else-if="availableSources.length">本机已落盘：<code>{{ availableSources.join(', ') }}</code></span>
       <span>Profile：<b>{{ runtime.profile }}</b></span>
       <span>当前结果：{{ lines.length }} 行</span>
+      <span v-if="lastUpdated" class="muted" style="font-size:11px">最后更新 {{ lastUpdated }}</span>
       <n-tag v-if="summary.warnings" size="small" type="warning" :bordered="false">{{ summary.warnings }} 条警告</n-tag>
       <n-tag v-if="summary.errors" size="small" type="error" :bordered="false">{{ summary.errors }} 条错误</n-tag>
     </div>

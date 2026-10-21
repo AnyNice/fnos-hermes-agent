@@ -18,7 +18,8 @@
 
 import path from 'node:path';
 import { readFile, stat, mkdir } from 'node:fs/promises';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import WSClib from './_vendor/ws/wrapper.mjs';
@@ -197,6 +198,32 @@ export function createNasAdminHost(options = {}) {
     };
   }
 
+  // v0.21.166 日志尾部读：agent.log / gateway.log 会增长到几十 MB，2s 轮询下全量 readFile
+  // 每次拖数 MB I/O，是「运行日志刷新慢/不刷新」的根因。改为只读文件末尾 limit*4096 字节
+  // （每行预算 4KB，保守够用取最后 limit 行）。读全则原样切行；截断读则首个字节可能落在
+  // 半行中间 → 丢掉首个不完整行，避免把断行残片渲染成日志。同步小段读（<数十KB）对事件
+  // 循环阻塞 <10ms，可接受（monitor 的 /api/status 早已用 64KB 尾部读同思路）。
+  function readLogTail(file, limit, maxLineBytes = 4096) {
+    const size = statSync(file).size;
+    if (size === 0) return [];
+    const readBytes = Math.min(size, limit * maxLineBytes + maxLineBytes);
+    let buf;
+    if (readBytes >= size) {
+      buf = readFileSync(file);
+    } else {
+      const fd = openSync(file, 'r');
+      try {
+        const start = size - readBytes;
+        buf = Buffer.alloc(readBytes);
+        const got = readSync(fd, buf, 0, readBytes, start);
+        if (got < 0) return [];
+        if (got < readBytes) buf = buf.subarray(0, got);
+      } finally { closeSync(fd); }
+    }
+    const lines = buf.toString('utf8').split(/\r?\n/).filter(Boolean);
+    return (readBytes < size ? lines.slice(1) : lines).slice(-limit);
+  }
+
   async function readLogs(url) {
     const requested = url.searchParams.get('source') || 'all';
     const level = url.searchParams.get('level') || 'all';
@@ -209,8 +236,8 @@ export function createNasAdminHost(options = {}) {
       if (requested !== 'all' && requested !== source) continue;
       for (const file of info.files) {
         try {
-          const text = await readFile(file, 'utf8');
-          for (const line of text.split(/\r?\n/).filter(Boolean).slice(-limit)) {
+          const lines = readLogTail(file, limit);
+          for (const line of lines) {
             combined.push({ at: '', source, line: line.slice(0, 4000), ...logMeta(source, line) });
           }
         } catch {}
@@ -230,6 +257,9 @@ export function createNasAdminHost(options = {}) {
     const presentSources = ['all', ...[...available.entries()].filter(([, info]) => info.present).map(([s]) => s)];
     return {
       lines: combined,
+      // v0.21.166：服务端生成时间戳，前端「运行日志」显示「最后更新 hh:mm:ss」，
+      // 让 2s/5s 轮询的刷新可感知（此前只有行内容变化才看得见刷新，无内容增长时像"卡住"）。
+      serverTs: Date.now(),
       sources: presentSources,
       sourcesAll: ['all', ...Object.keys(diskLogSources)],
       levels: ['all', 'debug', 'info', 'warning', 'error'],
@@ -598,7 +628,14 @@ export function createNasAdminHost(options = {}) {
   }
 
   // ── 静态资源（路径穿越防护；index.html no-store，hash 化 assets 长缓存）──
-  async function staticFile(directory, relative, reqMethod) {
+  // v0.21.166 on-the-fly gzip：work-ui 构建产物 44MB（主 bundle ~700KB + 语言/图标等数百个
+  // 小 chunk，明文合计 ~10MB+）此前零压缩回传——每次冷启动/清缓存后「每个页面都加载很久」
+  // 的主因（NAS 侧磁盘/内存富余，CPU 压 1 次 700KB 文本 <50ms，收益 >> 成本）。仅压缩文本类
+  // （text/*、js、json、svg）且 ≥1KB（更小文件压缩头不划算）；请求未声明 gzip 能力则原样回传。
+  // Vary: Accept-Encoding 让中间缓存（门户反代）按压缩变体分别缓存，防止串包。
+  const GZIP_MIN_BYTES = 1024;
+  const GZIP_CONTENT_TYPES = /^text\/|^application\/(javascript|ecmascript|x-javascript|json|xml)|image\/svg\+xml/;
+  async function staticFile(directory, relative, reqMethod, request) {
     let resolved = path.resolve(directory, relative || 'index.html');
     if (resolved !== directory && !resolved.startsWith(directory + path.sep)) {
       return new Response(JSON.stringify({ error: 'Invalid path' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
@@ -615,12 +652,24 @@ export function createNasAdminHost(options = {}) {
       const hashedAsset = relative.startsWith('assets/') || relative.includes('/assets/')
         || relative.startsWith('ds-assets/') || relative.includes('/ds-assets/');
       const cacheable = hashedAsset ? 'public, max-age=31536000, immutable' : 'no-store';
+      const contentType = contentTypes[ext] || 'application/octet-stream';
       const headers = {
-        'Content-Type': contentTypes[ext] || 'application/octet-stream',
+        'Content-Type': contentType,
         'Cache-Control': path.extname(resolved) === '.html' ? 'no-store' : cacheable,
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'same-origin',
+        'Vary': 'Accept-Encoding',
       };
+      if (reqMethod !== 'HEAD' && data.length >= GZIP_MIN_BYTES
+        && GZIP_CONTENT_TYPES.test(contentType)
+        && /gzip/i.test(request?.headers?.get('accept-encoding') || '')) {
+        const gz = gzipSync(data, { level: 6 });
+        if (gz.length > 0 && gz.length < data.length) {
+          headers['Content-Encoding'] = 'gzip';
+          headers['Content-Length'] = String(gz.length);
+          return new Response(gz, { status: 200, headers });
+        }
+      }
       return new Response(reqMethod === 'HEAD' ? Buffer.alloc(0) : data, { status: 200, headers });
     } catch {
       return new Response(JSON.stringify({ error: '页面尚未构建，请确认安装包完整。' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
@@ -668,7 +717,7 @@ export function createNasAdminHost(options = {}) {
       if (fileRel === '/') fileRel = ''; // 目录根（/admin/web/ 等）回到 index.html
       // 浏览器可能以百分号编码发请求（CJK/空格文件名），解码后再落盘；解码失败按原始路径尝试。
       try { if (fileRel.includes('%')) fileRel = decodeURIComponent(fileRel); } catch {}
-      return await staticFile(directory, fileRel, method);
+      return await staticFile(directory, fileRel, method, request);
     }
 
     // 宿主 API

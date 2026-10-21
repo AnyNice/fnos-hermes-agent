@@ -147,12 +147,15 @@ const logSource = ref('host');
 const logLines = ref(100);
 const logLive = ref(true);
 const logRows = ref<any[]>([]);
+// v0.21.166：记录「最后更新」时间戳——轮询刷新是否真的在跑可感知（此前无内容增长时看起来像卡住）
+const logUpdated = ref('');
 const logSourceOptions = ['host', 'all', 'dashboard', 'gateway', 'agent', 'error'].map(v => ({ value: v, label: ({ host: '宿主 monitor', all: '全部磁盘来源', dashboard: '仪表盘', gateway: '通讯网关', agent: 'Agent', error: '错误日志' } as Record<string, string>)[v] }));
 let logTimer: ReturnType<typeof setInterval>;
 async function loadLog() {
   try {
     const data: any = await request(`api/host/logs?source=${logSource.value}&lines=${logLines.value}`);
     logRows.value = data.lines || [];
+    logUpdated.value = new Date(data.serverTs || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
   } catch {}
 }
 
@@ -233,6 +236,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', updateNarrow); fini
       <n-select v-model:value="logSource" size="small" :options="logSourceOptions" style="width:150px" @update:value="loadLog" />
       <n-select v-model:value="logLines" size="small" :options="[50,100,200].map(v=>({label:`${v} 行`,value:v}))" style="width:110px" @update:value="loadLog" />
       <label class="inline"><n-switch v-model:value="logLive" size="small" />自动刷新</label>
+      <span v-if="logUpdated" class="muted" style="font-size:11px">最后更新 {{ logUpdated }}</span>
       <n-button size="small" quaternary @click="loadLog">刷新</n-button>
     </div>
     <div class="log-window"><div v-if="!logRows.length" class="muted">该来源暂无日志内容（可能尚未运行或文件未落盘）。</div><div v-for="(row, index) in logRows" :key="index" :class="`ll-${row.level}`"><span class="ll-src">[{{ String(row.source).toUpperCase() }}]</span> {{ row.line }}</div></div>

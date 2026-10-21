@@ -48,7 +48,15 @@ export async function request<T = any>(path: string, options: RequestInit = {}):
 // 同飞行去重（v0.21.163）：切页/并发时，完全相同的 GET（同 URL+profile）在飞期内合并为一次真实请求，
 // 消除「每次切换功能页都重新拉一遍 Hermes 数据」的重复与慢（多个请求同时打到同一 dashboard 端点排队）。
 const _inflight = new Map<string, Promise<unknown>>();
-export function native<T = any>(path: string, profile: string, method = 'GET', body?: unknown): Promise<T> {
+// GET 结果 TTL 缓存（v0.21.166）：5s 窗口内的相同 GET 直接复用上次成功结果，消除「切走再切回
+// 隔 1~5s」场景的重复拉取（in-flight 去重只合「同时在飞」，时序错开就失效）。
+// 豁免实时端点（/api/logs、resources、status：日志窗口与 3s/5s 采样要求新鲜）；
+// 任何写操作（POST/PUT/DELETE）成功即全量失效——配置改动后读路径必须拿新值。
+const _getCache = new Map<string, { at: number; promise: Promise<unknown> }>();
+const GET_CACHE_TTL_MS = 5000;
+const GET_CACHE_EXEMPT = /\/(logs|resources|status)(\?|$)/;
+function nativeInvalidateCache() { _getCache.clear(); }
+export function native<T = any>(path: string, profile: string, method = 'GET', body?: unknown, opts: { noCache?: boolean } = {}): Promise<T> {
   const url = new URL(`api/native${path}`, hostRoot);
   url.searchParams.set('profile', profile);
   // 仅 GET 且无 body 可去重（幂等读）；POST/PUT 有副作用，绝不合并。
@@ -58,9 +66,22 @@ export function native<T = any>(path: string, profile: string, method = 'GET', b
     if (existing) return existing as Promise<T>;
     const p = request<T>(url.href, { method }).finally(() => { _inflight.delete(key); });
     _inflight.set(key, p);
+    if (!opts.noCache && !GET_CACHE_EXEMPT.test(path)) {
+      const now = Date.now();
+      const hit = _getCache.get(key);
+      if (hit && now - hit.at < GET_CACHE_TTL_MS) return hit.promise as Promise<T>;
+      const entry: { at: number; promise: Promise<unknown> } = { at: now, promise: p };
+      _getCache.set(key, entry);
+      // 成功落地后刷新 at（计时从返回算起，慢请求不吃满 5s 窗口）；失败则摘除——陈旧/错误结果不可缓存。
+      p.then(() => { entry.at = Date.now(); }, () => { _getCache.delete(key); });
+      return entry.promise as Promise<T>;
+    }
     return p;
   }
-  return request<T>(url.href, { method, ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+  const p = request(url.href, { method, ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+  // 写操作成功 → 读缓存全部失效（配置/模型/端点已变，陈旧 GET 结果必须不再复用）。
+  p.then(() => { if (method !== 'GET') nativeInvalidateCache(); }).catch(() => {});
+  return p as Promise<T>;
 }
 
 export function workUrl(profile: string): string {
