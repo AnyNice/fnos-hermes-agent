@@ -13,7 +13,7 @@
 
 **Hermes Agent for fnOS** 把官方 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 完整跑进飞牛 NAS（fnOS）：原生 `.fpk` 一键安装，内置官方核心源码（editable 安装 + 预构建前端），自带 **Hermes Admin 管理面板**与**官方桌面端同款工作界面（浏览器适配）**，支持多模型供应商、多消息平台、定时任务、持久记忆与技能系统。
 
-> **项目来源**：本项目由 [veenyi/fnos-hermes-agent](https://github.com/veenyi/fnos-hermes-agent) 的 fnOS 适配发展而来，现由 **AnyNice** 接手维护并重构。当前应用包 **v0.21.152**，内置官方稳定核心 **Hermes Agent 0.22.2**（tag `v0.22.2`，提交 `d923a5eb`）。核心按官方 tag 与完整提交锁定（`config/bootstrap/hermes-source.json`），应用包版本与核心版本分别管理。
+> **项目来源**：本项目由 [veenyi/fnos-hermes-agent](https://github.com/veenyi/fnos-hermes-agent) 的 fnOS 适配发展而来，现由 **AnyNice** 接手维护并重构。当前应用包 **v0.21.165**，内置官方稳定核心 **Hermes Agent 0.22.2**（tag `v0.22.2`，提交 `d923a5eb`）。核心按官方 tag 与完整提交锁定（`config/bootstrap/hermes-source.json`），应用包版本与核心版本分别管理。
 
 ---
 
@@ -29,7 +29,7 @@
 ## 功能特性
 
 ### Hermes Admin 管理面板
-- **概览大屏**：服务状态（核心版本 / Commit / 构建时间）、一键启动 / 重启 / 停止、应用更新检查与 FPK 下载入口
+- **概览大屏**：服务状态（应用 FPK 版本 / 核心 tag / Commit / 构建时间四轨）、一键启动 / 重启 / 停止、通讯网关状态与可操作指引、应用更新检查与 FPK 下载入口
 - **工作区**：按 Profile 的原生项目目录定位与文件浏览
 - **模型管理**：45 家原生预设供应商搜索配置、自定义 OpenAI 兼容接口、模型发现与设为默认、OAuth 状态
 - **工具 / MCP**：原生工具集与技能启停、MCP 服务（HTTP/stdio）新增、启停、测试
@@ -52,6 +52,8 @@
 - **双架构通用**：单个 FPK 同时内置 x86_64 / arm64 的 CPython 3.14，装机时按 `uname -m` 自动适配，无需分架构下载
 - **看门狗诊断**、网关停止/重启提速、监控令牌鉴权
 - **升级保留数据**：应用包升级保留 config.yaml、sessions、skills 等用户数据
+- **配置自愈**：config.yaml 出现「同父重复键」类 YAML 格式错误时自动清洗（保留覆盖语义、首次备份），并周期体检，彻底打破「读失败即拒写」导致的保存/网关死锁（v0.21.164+）
+- **首装体验**：核心服务初始化期间（约 1 分钟）自动拦截写操作并给针对性指引，避免用户误以为「配置填错」（v0.21.164+）
 
 ## 安装
 
