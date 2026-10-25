@@ -794,16 +794,36 @@ function _moduleParseMcpServers(yml) {
     if (mEnd) block = mEnd[1];
   }
   let cur = null;
+  let lastKey = null;
   block.split("\n").forEach(l => {
     const km = l.match(/^  ([a-zA-Z0-9_\-]+):\s*$/);
-    if (km) { cur = km[1]; out[cur] = {}; return; }
+    if (km) { cur = km[1]; out[cur] = {}; lastKey = null; return; }
     if (cur && /^    \S/.test(l)) {
       const vm = l.match(/^    (\S+):\s*(.*)$/);
-      if (vm) out[cur][vm[1]] = vm[2].trim();
+      if (vm) { out[cur][vm[1]] = vm[2].trim(); lastKey = vm[1]; }
+      return;
+    }
+    // 支持 YAML 块列表形式（args 下的短横线列表项）；原实现只解析 key: value，列表项会被丢弃
+    if (cur && lastKey && /^\s+- /.test(l)) {
+      if (!Array.isArray(out[cur][lastKey])) out[cur][lastKey] = [];
+      out[cur][lastKey].push(normalizeCommand(l.replace(/^\s+- /, "").trim()));
     }
   });
   return out;
 }
+// 归一化 command 值：解一层 JSON 引号，纯引号/空白视为空。
+// 修复：url-only MCP 被写入 command: "" 后，每轮回写会再 JSON.stringify 一次，
+// 导致反斜杠指数增长，约 28 轮（84 分钟）后突破 V8 字符串上限。
+function normalizeCommand(v) {
+  if (typeof v !== 'string') return v || '';
+  let s2 = v.trim();
+  if ((s2.startsWith('"') && s2.endsWith('"')) || (s2.startsWith("'") && s2.endsWith("'"))) {
+    try { s2 = JSON.parse(s2); } catch (_) { s2 = s2.slice(1, -1); }
+  }
+  s2 = String(s2).trim();
+  return (s2 === '' || s2 === '""' || s2 === "''") ? '' : s2;
+}
+
 function _moduleLevelAutoRegisterMcp() {
   try {
     let st = {};
@@ -832,9 +852,12 @@ function _moduleLevelAutoRegisterMcp() {
     } else {
       block = "mcp_servers:\n" + names.map(function (n) {
         const e = merged[n];
-        const cmd = e.command || e.command_cmd || "";
+        const cmd = normalizeCommand(e.command || e.command_cmd);
         const args = Array.isArray(e.args) ? e.args : [];
-        let out = "  " + n + ":\n    command: " + JSON.stringify(cmd) + "\n";
+        // 只有 stdio 型（没有 url）才写 command：
+        // url-only 条目写 command 会制造空值，进而在下一轮被再次转义 → 指数膨胀
+        let out = "  " + n + ":\n";
+        if (cmd && !e.url) out += "    command: " + JSON.stringify(cmd) + "\n";
         if (args.length) out += "    args:\n" + args.map(a => "      - " + JSON.stringify(a)).join("\n") + "\n";
         Object.keys(e).forEach(k2 => {
           if (k2 === "command" || k2 === "args" || k2 === "command_cmd") return;
@@ -843,8 +866,17 @@ function _moduleLevelAutoRegisterMcp() {
         return out.replace(/\n$/, "");
       }).join("\n");
     }
-    yml = _replaceTopLevelKey(yml, "mcp_servers", block);
-    try { writeFileSync(HERMES_CONFIG, yml, { mode: 0o644 }); } catch (e) {}
+    const nextYml = _replaceTopLevelKey(yml, "mcp_servers", block);
+    // 防御：块体积异常增长（转义膨胀 / 外部写坏）时拒绝落盘，避免把用户配置写死
+    if (nextYml.length > yml.length * 2 + 8192) {
+      log("[MCP-BRIDGE] refuse to write: mcp_servers block grew abnormally (" + yml.length + " -> " + nextYml.length + " bytes)");
+      return;
+    }
+    // 内容未变化则不写盘，避免无谓的 config 重载
+    if (nextYml !== yml) {
+      try { writeFileSync(HERMES_CONFIG, nextYml, { mode: 0o644 }); } catch (e) {}
+    }
+    yml = nextYml;
     const connCount = Object.keys(connObj).length;
     if (connCount > 0) log(`[MCP-BRIDGE] auto-register: ${connCount} 个网关连接器已同步到 config.yaml（共 ${names.length} 个 MCP server）`);
   } catch (e) { log("[MCP-BRIDGE] module-level auto-register failed: " + e.message); }
