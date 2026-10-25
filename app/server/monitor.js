@@ -798,30 +798,45 @@ function _moduleParseMcpServers(yml) {
   block.split("\n").forEach(l => {
     const km = l.match(/^  ([a-zA-Z0-9_\-]+):\s*$/);
     if (km) { cur = km[1]; out[cur] = {}; lastKey = null; return; }
-    if (cur && /^    \S/.test(l)) {
-      const vm = l.match(/^    (\S+):\s*(.*)$/);
-      if (vm) { out[cur][vm[1]] = vm[2].trim(); lastKey = vm[1]; }
-      return;
-    }
-    // 支持 YAML 块列表形式（args 下的短横线列表项）；原实现只解析 key: value，列表项会被丢弃
+    // 列表项必须先于标量分支处理：YAML 允许 4 空格或 6 空格缩进的 "- item"
     if (cur && lastKey && /^\s+- /.test(l)) {
       if (!Array.isArray(out[cur][lastKey])) out[cur][lastKey] = [];
       out[cur][lastKey].push(normalizeCommand(l.replace(/^\s+- /, "").trim()));
+      return;
+    }
+    if (cur && /^    \S/.test(l)) {
+      const vm = l.match(/^    (\S+):\s*(.*)$/);
+      if (vm) { out[cur][vm[1]] = vm[2].trim(); lastKey = vm[1]; }
+      // 注意：这里不再 return —— 无 key 的行留给后续分支判断
     }
   });
   return out;
 }
-// 归一化 command 值：解一层 JSON 引号，纯引号/空白视为空。
-// 修复：url-only MCP 被写入 command: "" 后，每轮回写会再 JSON.stringify 一次，
+// 归一化 command 值：有界地解开多层 JSON 引号（历史污染可能是多层）。
+// 修复：url-only MCP 被写入 command: "" 后，每轮回写再 stringify 一次，
 // 导致反斜杠指数增长，约 28 轮（84 分钟）后突破 V8 字符串上限。
 function normalizeCommand(v) {
   if (typeof v !== 'string') return v || '';
   let s2 = v.trim();
-  if ((s2.startsWith('"') && s2.endsWith('"')) || (s2.startsWith("'") && s2.endsWith("'"))) {
-    try { s2 = JSON.parse(s2); } catch (_) { s2 = s2.slice(1, -1); }
+  for (let i = 0; i < 8; i++) {
+    const dq = s2.startsWith('"') && s2.endsWith('"') && s2.length >= 2;
+    const sq = s2.startsWith("'") && s2.endsWith("'") && s2.length >= 2;
+    if (!dq && !sq) break;
+    let next;
+    try { next = JSON.parse(s2); } catch (_) { next = s2.slice(1, -1); }
+    if (typeof next !== 'string' || next === s2) break;
+    s2 = next.trim();
   }
-  s2 = String(s2).trim();
   return (s2 === '' || s2 === '""' || s2 === "''") ? '' : s2;
+}
+
+// 量出 config.yaml 中 mcp_servers 段的字符长度（用于体积哨兵）
+function _mcpBlockLen(yml) {
+  const t = String(yml || '');
+  const m = t.match(/^mcp_servers:[ \t]*\n([\s\S]*?)(?=^[a-zA-Z_][a-zA-Z0-9_-]*:)/m);
+  if (m) return m[1].length;
+  const m2 = t.match(/^mcp_servers:[ \t]*\n([\s\S]*)$/m);
+  return m2 ? m2[1].length : 0;
 }
 
 function _moduleLevelAutoRegisterMcp() {
@@ -866,12 +881,14 @@ function _moduleLevelAutoRegisterMcp() {
         return out.replace(/\n$/, "");
       }).join("\n");
     }
-    const nextYml = _replaceTopLevelKey(yml, "mcp_servers", block);
-    // 防御：块体积异常增长（转义膨胀 / 外部写坏）时拒绝落盘，避免把用户配置写死
-    if (nextYml.length > yml.length * 2 + 8192) {
-      log("[MCP-BRIDGE] refuse to write: mcp_servers block grew abnormally (" + yml.length + " -> " + nextYml.length + " bytes)");
+    // 防御：只比较 mcp_servers 段自身的增长（不是整个文件）。
+    // 16KB 下限允许一次性新增较大的 stdio server，又能在块体积翻倍时立刻拦住。
+    const oldBlockLen = _mcpBlockLen(yml);
+    if (block.length > Math.max(oldBlockLen * 2 + 1024, 16384)) {
+      log("[MCP-BRIDGE] refuse to write: mcp_servers block grew abnormally (" + oldBlockLen + " -> " + block.length + " bytes)");
       return;
     }
+    const nextYml = _replaceTopLevelKey(yml, "mcp_servers", block);
     // 内容未变化则不写盘，避免无谓的 config 重载
     if (nextYml !== yml) {
       try { writeFileSync(HERMES_CONFIG, nextYml, { mode: 0o644 }); } catch (e) {}
