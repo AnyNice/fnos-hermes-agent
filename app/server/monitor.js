@@ -784,123 +784,243 @@ function _replaceTopLevelKey(raw, key, block) {
 
 // 模块级自动注册：直接操作文件，不依赖 handleFetch 内部函数
 function _moduleParseMcpServers(yml) {
-  const out = {};
+  const out = Object.create(null);
   const s = String(yml || "");
+  if ((s.match(/^mcp_servers:[ \t]*/gm) || []).length > 1) return null;
   const inlineTop = s.match(/^mcp_servers:[ \t]*(\{.*\})[ \t]*(?:#.*)?$/m);
   if (inlineTop) {
     const parsed = _moduleParseFlowMap(inlineTop[1], 0);
-    if (!parsed || Object.keys(parsed).some(k => !parsed[k] || Array.isArray(parsed[k]) || typeof parsed[k] !== "object")) return {};
+    if (!parsed || Object.keys(parsed).some(k => !parsed[k] || Array.isArray(parsed[k]) || typeof parsed[k] !== "object")) return null;
     return parsed;
   }
   let block = "";
-  const mTop = s.match(/^mcp_servers:\s*\n([\s\S]*?)(?=^[a-zA-Z_][a-zA-Z0-9_-]*:)/m);
+  const mTop = s.match(/^mcp_servers:[ \t]*(?:#.*)?\r?\n([\s\S]*?)(?=^[a-zA-Z_][a-zA-Z0-9_-]*:)/m);
   if (mTop) block = mTop[1];
   else {
-    const mEnd = s.match(/^mcp_servers:\s*\n([\s\S]*)$/m);
+    const mEnd = s.match(/^mcp_servers:[ \t]*(?:#.*)?\r?\n([\s\S]*)$/m);
     if (mEnd) block = mEnd[1];
   }
   let cur = null;
   let lastKey = null;
+  let valid = true;
   const blockLines = block.split("\n");
   blockLines.forEach((l, i) => {
-    const km = l.match(/^  ([a-zA-Z0-9_\-]+):\s*$/);
-    if (km) { cur = km[1]; out[cur] = {}; lastKey = null; return; }
+    const trimmed = l.trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+    if (/^ {2}\S/.test(l)) {
+      const body = l.slice(2);
+      const split = _flowColonIndex(body);
+      const key = split > 0 ? decodeMcpScalarOnce(body.slice(0, split)) : "";
+      let value = split > 0 ? body.slice(split + 1).trim() : "";
+      if (/^#/.test(value)) value = "";
+      if (split < 1 || typeof key !== "string" || !/^[A-Za-z0-9_-]+$/.test(key) || value && value[0] !== "{") { valid = false; return; }
+      if (Object.prototype.hasOwnProperty.call(out, key)) { valid = false; return; }
+      cur = key;
+      if (value) {
+        const flowValue = _moduleParseFlowValue(value, 0);
+        if (!flowValue || Array.isArray(flowValue) || typeof flowValue !== "object") { valid = false; return; }
+        out[cur] = flowValue;
+      } else out[cur] = Object.create(null);
+      lastKey = null; return;
+    }
     // 列表项必须先于标量分支处理：YAML 允许 4 空格或 6 空格缩进的 "- item"
     if (cur && lastKey && /^\s+- /.test(l)) {
+      if (!/^ {6,}- /.test(l) || (!Array.isArray(out[cur][lastKey]) && out[cur][lastKey] !== "")) { valid = false; return; }
       if (!Array.isArray(out[cur][lastKey])) out[cur][lastKey] = [];
-      out[cur][lastKey].push(decodeMcpScalarOnce(l.replace(/^\s+- /, "").trim()));
+      const item = decodeMcpScalarOnce(l.replace(/^\s+- /, "").trim());
+      if (item === undefined) { valid = false; return; }
+      out[cur][lastKey].push(item);
       return;
     }
     if (cur && lastKey && /^      \S/.test(l) && out[cur][lastKey] && typeof out[cur][lastKey] === "object" && !Array.isArray(out[cur][lastKey])) {
-      const mm = l.match(/^      ([^:]+):\s*(.*)$/);
-      if (mm) out[cur][lastKey][mm[1].trim()] = decodeMcpScalarOnce(mm[2].trim());
+      const body = l.slice(6);
+      const split = _flowColonIndex(body);
+      const key = split > 0 ? decodeMcpScalarOnce(body.slice(0, split)) : "";
+      if (split < 1 || typeof key !== "string" || !key || Object.prototype.hasOwnProperty.call(out[cur][lastKey], key)) { valid = false; return; }
+      const value = decodeMcpScalarOnce(body.slice(split + 1).trim());
+      if (value === undefined) { valid = false; return; }
+      out[cur][lastKey][key] = value;
       return;
     }
     if (cur && /^    \S/.test(l)) {
-      const vm = l.match(/^    (\S+):\s*(.*)$/);
-      if (vm) {
-        const value = vm[2].trim();
+      const body = l.slice(4);
+      const split = _flowColonIndex(body);
+      const key = split > 0 ? decodeMcpScalarOnce(body.slice(0, split)) : "";
+      if (split > 0 && typeof key === "string" && /^[A-Za-z0-9_-]+$/.test(key)) {
+        if (Object.prototype.hasOwnProperty.call(out[cur], key)) { valid = false; return; }
+        let value = body.slice(split + 1).trim();
+        if (/^#/.test(value)) value = "";
         // 空值字段可能是嵌套 map；若按标量保留，会在回写时丢掉认证头等子项。
         let next = i + 1;
-        while (next < blockLines.length && !blockLines[next].trim()) next++;
+        while (next < blockLines.length && (!blockLines[next].trim() || blockLines[next].trim().startsWith("#"))) next++;
         const hasNestedMap = value === "" && next < blockLines.length && /^      [^\s-][^:]*:\s*/.test(blockLines[next]);
-        out[cur][vm[1]] = hasNestedMap ? {} : value;
-        lastKey = vm[1];
+        if (hasNestedMap) out[cur][key] = Object.create(null);
+        else if (value[0] === "{" || value[0] === "[") {
+          const flowValue = _moduleParseFlowValue(value, 0);
+          if (flowValue === undefined) { valid = false; return; }
+          out[cur][key] = flowValue;
+        } else {
+          const scalar = decodeMcpScalarOnce(value);
+          if (scalar === undefined) { valid = false; return; }
+          out[cur][key] = scalar;
+        }
+        lastKey = key;
+        return;
       }
-      // 注意：这里不再 return —— 无 key 的行留给后续分支判断
     }
+    valid = false;
   });
-  return out;
+  return valid ? out : null;
 }
-// Inline YAML 的 flow 语法只接受本模块能无损回写的单行子集；无法确认边界时交给写入护栏拒绝。
-function _moduleParseFlowMap(text, depth) {
-  const s = String(text || "").trim();
-  if (depth > 2 || s[0] !== "{" || s[s.length - 1] !== "}") return null;
-  const body = s.slice(1, -1).trim();
-  if (!body) return {};
+// Inline YAML 的 flow 语法只接受能够完整确认边界、并能安全写回的值；无法确认时返回 null，
+// 由调用方拒绝改写原文件。扫描器必须理解引号，否则 URL/参数中的逗号或花括号会被误切分。
+function _splitMcpFlow(text) {
   const parts = [];
-  let start = 0, braces = 0, brackets = 0;
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
+  let start = 0, braces = 0, brackets = 0, quote = "", escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote === '"') {
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (ch === '"') quote = "";
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'" && text[i + 1] === "'") { i++; continue; }
+      if (ch === "'") quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
     if (ch === "{") braces++;
-    else if (ch === "}") { if (braces === 0) return null; braces--; }
+    else if (ch === "}") { if (!braces) return null; braces--; }
     else if (ch === "[") brackets++;
-    else if (ch === "]") { if (brackets === 0) return null; brackets--; }
-    else if (ch === "," && braces === 0 && brackets === 0) { parts.push(body.slice(start, i).trim()); start = i + 1; }
-  }
-  if (braces || brackets) return null;
-  parts.push(body.slice(start).trim());
-  const out = {};
-  for (const part of parts) {
-    if (!part) return null;
-    let split = -1, nested = 0, array = 0;
-    for (let i = 0; i < part.length; i++) {
-      const ch = part[i];
-      if (ch === "{") nested++;
-      else if (ch === "}") nested--;
-      else if (ch === "[") array++;
-      else if (ch === "]") array--;
-      else if (ch === ":" && nested === 0 && array === 0) { split = i; break; }
-    }
-    if (split < 1) return null;
-    const key = part.slice(0, split).trim();
-    const rawValue = part.slice(split + 1).trim();
-    if (!/^[a-zA-Z0-9_-]+$/.test(key) || !rawValue || Object.prototype.hasOwnProperty.call(out, key)) return null;
-    if (rawValue[0] === "{") {
-      const value = _moduleParseFlowMap(rawValue, depth + 1);
-      if (!value) return null;
-      out[key] = value;
-    } else if (rawValue[0] === "[") {
-      if (rawValue[rawValue.length - 1] !== "]") return null;
-      const values = rawValue.slice(1, -1).trim();
-      let quote = "", escaped = false;
-      for (const ch of values) {
-        if (escaped) { escaped = false; continue; }
-        if (ch === "\\" && quote === '"') { escaped = true; continue; }
-        if (quote) { if (ch === quote) quote = ""; else if (ch === ",") return null; }
-        else if (ch === '"' || ch === "'") quote = ch;
-      }
-      if (quote || escaped) return null;
-      out[key] = values ? values.split(",").map(v => v.trim()).map(v => decodeMcpScalarOnce(v)) : [];
-    } else {
-      if (/[{}\[\]]/.test(rawValue)) return null;
-      out[key] = decodeMcpScalarOnce(rawValue);
+    else if (ch === "]") { if (!brackets) return null; brackets--; }
+    else if (ch === "," && braces === 0 && brackets === 0) {
+      parts.push(text.slice(start, i).trim()); start = i + 1;
     }
   }
-  return out;
+  if (quote || escaped || braces || brackets) return null;
+  parts.push(text.slice(start).trim());
+  return parts;
+}
+function _flowColonIndex(part) {
+  let braces = 0, brackets = 0, quote = "", escaped = false;
+  for (let i = 0; i < part.length; i++) {
+    const ch = part[i];
+    if (quote === '"') {
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (ch === '"') quote = "";
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'" && part[i + 1] === "'") { i++; continue; }
+      if (ch === "'") quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "{") braces++;
+    else if (ch === "}") braces--;
+    else if (ch === "[") brackets++;
+    else if (ch === "]") brackets--;
+    else if (ch === ":" && braces === 0 && brackets === 0) return i;
+  }
+  return -1;
+}
+function _decodeMcpFlowScalar(value) {
+  const s = String(value || "").trim();
+  if (!s) return undefined;
+  if (s[0] === "'") {
+    if (s.length < 2) return undefined;
+    let out = "";
+    for (let i = 1; i < s.length; i++) {
+      if (s[i] !== "'") { out += s[i]; continue; }
+      if (s[i + 1] === "'") { out += "'"; i++; continue; }
+      return i === s.length - 1 ? out : undefined;
+    }
+    return undefined;
+  }
+  if (s[0] === '"') {
+    if (s.length < 2) return undefined;
+    let out = "";
+    const escapes = { "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\x0b", f: "\f", r: "\r", e: "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\", N: "\u0085", _: "\u00a0", L: "\u2028", P: "\u2029" };
+    for (let i = 1; i < s.length; i++) {
+      if (s[i] === '"') return i === s.length - 1 ? out : undefined;
+      if (s[i] !== "\\") { out += s[i]; continue; }
+      if (i + 1 >= s.length) return undefined;
+      const esc = s[++i];
+      if (esc === "x" || esc === "u" || esc === "U") {
+        const count = esc === "x" ? 2 : esc === "u" ? 4 : 8;
+        const hex = s.slice(i + 1, i + 1 + count);
+        if (!new RegExp("^[0-9a-fA-F]{" + count + "}$").test(hex)) return undefined;
+        out += String.fromCodePoint(parseInt(hex, 16)); i += count;
+      } else if (Object.prototype.hasOwnProperty.call(escapes, esc)) out += escapes[esc];
+      else return undefined;
+    }
+    return undefined;
+  }
+  if (/[{}\[\],]/.test(s) || /\s#/.test(s) || /:\s/.test(s) || /^[!&*|>@`]/.test(s)) return undefined;
+  if (/^(?:null|Null|NULL|~)$/.test(s)) return null;
+  if (/^(?:true|True|TRUE)$/.test(s)) return true;
+  if (/^(?:false|False|FALSE)$/.test(s)) return false;
+  if (/^[+-]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/.test(s)) return Number(s);
+  if (/^0x[0-9a-fA-F]+$/.test(s)) return parseInt(s.slice(2), 16);
+  if (/^0o[0-7]+$/.test(s)) return parseInt(s.slice(2), 8);
+  return s;
+}
+function _moduleParseFlowValue(raw, depth) {
+  const s = String(raw || "").trim();
+  if (depth > 3 || !s) return undefined;
+  if (s[0] === "{") {
+    if (s[s.length - 1] !== "}") return undefined;
+    const body = s.slice(1, -1).trim();
+    const parts = body ? _splitMcpFlow(body) : [];
+    if (parts === null) return undefined;
+    if (parts[parts.length - 1] === "") parts.pop(); // YAML permits one trailing comma.
+    const out = Object.create(null);
+    for (const part of parts) {
+      if (!part) return undefined;
+      const split = _flowColonIndex(part);
+      if (split < 1) return undefined;
+      const key = _decodeMcpFlowScalar(part.slice(0, split));
+      if (key === undefined || typeof key !== "string" || !/^[A-Za-z0-9_-]+$/.test(key) || Object.prototype.hasOwnProperty.call(out, key)) return undefined;
+      const val = _moduleParseFlowValue(part.slice(split + 1), depth + 1);
+      if (val === undefined) return undefined;
+      out[key] = val;
+    }
+    return out;
+  }
+  if (s[0] === "[") {
+    if (s[s.length - 1] !== "]") return undefined;
+    const body = s.slice(1, -1).trim();
+    if (!body) return [];
+    const parts = _splitMcpFlow(body);
+    if (!parts) return undefined;
+    if (parts[parts.length - 1] === "") parts.pop(); // YAML permits one trailing comma.
+    const out = [];
+    for (const part of parts) {
+      const val = _moduleParseFlowValue(part, depth + 1);
+      if (val === undefined) return undefined;
+      out.push(val);
+    }
+    return out;
+  }
+  return _decodeMcpFlowScalar(s);
+}
+function _moduleParseFlowMap(text, depth) {
+  return _moduleParseFlowValue(text, depth);
 }
 function decodeMcpScalarOnce(v) {
   const s2 = String(v == null ? "" : v).trim();
-  if (s2.length >= 2 && s2[0] === '"' && s2[s2.length - 1] === '"') {
-    try {
-      const decoded = JSON.parse(s2);
-      if (typeof decoded === "string") return decoded;
-    } catch (_) {}
+  if (!s2) return "";
+  if (s2[0] === "{" || s2[0] === "[") {
+    const flowValue = _moduleParseFlowValue(s2, 0);
+    if (flowValue !== undefined) return flowValue;
   }
-  if (s2.length >= 2 && s2[0] === "'" && s2[s2.length - 1] === "'") {
-    return s2.slice(1, -1).replace(/''/g, "'");
-  }
-  return s2;
+  if (s2[0] === '"' || s2[0] === "'") return _decodeMcpFlowScalar(s2);
+  const plain = s2.replace(/\s+#.*$/, "").trim();
+  if (!plain) return null;
+  return _decodeMcpFlowScalar(plain);
 }
 // 归一化 command 值：有界地解开多层 JSON 引号（历史污染可能是多层）。
 // 修复：url-only MCP 被写入 command: "" 后，每轮回写再 stringify 一次，
@@ -918,6 +1038,30 @@ function normalizeCommand(v) {
     s2 = next.trim();
   }
   return (s2 === '' || s2 === '""' || s2 === "''") ? '' : s2;
+}
+
+function _mcpYamlKey(key) {
+  const s = String(key == null ? "" : key);
+  return /^[A-Za-z0-9_-]+$/.test(s) ? s : JSON.stringify(s);
+}
+function _mcpYamlScalar(value) {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null) return "null";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value == null ? "" : value);
+}
+function _mcpYamlField(indent, key, value) {
+  const prefix = indent + _mcpYamlKey(key) + ":";
+  if (Array.isArray(value)) {
+    if (!value.length) return prefix + " []";
+    return prefix + "\n" + value.map(v => indent + "  - " + _mcpYamlScalar(v)).join("\n");
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    if (!keys.length) return prefix + " {}";
+    return prefix + "\n" + keys.map(k => _mcpYamlField(indent + "  ", k, value[k])).join("\n");
+  }
+  return prefix + " " + _mcpYamlScalar(value);
 }
 
 // 量出 config.yaml 中 mcp_servers 段的字符长度（用于体积哨兵）
@@ -945,11 +1089,15 @@ function _moduleLevelAutoRegisterMcp() {
     });
     // 合并：保留现有非 conn-* 的 MCP 服务器（用户手动配置不被覆盖），conn-* 按凭证补齐
     const merged = _moduleParseMcpServers(yml);
+    const mcpTopCount = yml.split(/\r?\n/).filter(line => /^mcp_servers:[ \t]*(?:\{|$|#)/.test(line)).length;
     const inlineSource = yml.match(/^mcp_servers:[ \t]*(.*)$/m);
-    const inlineValue = inlineSource ? inlineSource[1].replace(/[ \t]+#.*$/, "").trim() : "";
+    const inlineValue = inlineSource ? inlineSource[1].replace(/^\s*#.*$/, "").replace(/[ \t]+#.*$/, "").trim() : "";
     const hasInlineContent = !!inlineValue && inlineValue !== "{}";
-    const blockContent = _mcpBlockLen(yml) > 0;
-    if (Object.keys(merged).length === 0 && (hasInlineContent || blockContent)) {
+    const blockMatch = yml.match(/^mcp_servers:[ \t]*(?:#.*)?\r?\n([\s\S]*?)(?=^[a-zA-Z_][a-zA-Z0-9_-]*:|$)/m);
+    const blockContent = !!(blockMatch && blockMatch[1].split("\n").some(line => {
+      const t = line.trim(); return t && !t.startsWith("#");
+    }));
+    if (mcpTopCount > 1 || merged === null || (Object.keys(merged).length === 0 && (hasInlineContent || blockContent))) {
       log("[MCP-BRIDGE] refuse to write: existing mcp_servers could not be parsed");
       return;
     }
@@ -969,17 +1117,12 @@ function _moduleLevelAutoRegisterMcp() {
         const args = Array.isArray(e.args) ? e.args : [];
         // 只有 stdio 型（没有 url）才写 command：
         // url-only 条目写 command 会制造空值，进而在下一轮被再次转义 → 指数膨胀
-        let out = "  " + n + ":\n";
-        if (cmd && !e.url) out += "    command: " + JSON.stringify(cmd) + "\n";
-        if (args.length) out += "    args:\n" + args.map(a => "      - " + JSON.stringify(a)).join("\n") + "\n";
+        let out = "  " + _mcpYamlKey(n) + ":\n";
+        if (cmd && !e.url) out += _mcpYamlField("    ", "command", cmd) + "\n";
+        if (args.length) out += _mcpYamlField("    ", "args", args) + "\n";
         Object.keys(e).forEach(k2 => {
           if (k2 === "command" || k2 === "args" || k2 === "command_cmd") return;
-          const value = e[k2];
-          if (value && typeof value === "object" && !Array.isArray(value)) {
-            out += "    " + k2 + ":\n" + Object.keys(value).map(k3 => "      " + k3 + ": " + JSON.stringify(value[k3])).join("\n") + "\n";
-          } else {
-            out += "    " + k2 + ": " + value + "\n";
-          }
+          out += _mcpYamlField("    ", k2, e[k2]) + "\n";
         });
         return out.replace(/\n$/, "");
       }).join("\n");
