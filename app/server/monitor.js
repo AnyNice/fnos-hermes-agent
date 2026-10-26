@@ -762,13 +762,17 @@ let _autoRegisterGatewayMcpFn = null;
 // 导致每次写入都追加新块、config.yaml 被重复顶层键污染（网关解析异常 + 注册失效）。
 function _replaceTopLevelKey(raw, key, block) {
   if (!raw) return block;
+  const eol = /\r\n/.test(String(raw)) ? "\r\n" : "\n";
+  raw = String(raw).replace(/\r\n?/g, "\n");
+  block = String(block).replace(/\r\n?/g, "\n");
+  const finish = text => eol === "\n" ? text : text.replace(/\n/g, eol);
   const lines = raw.split("\n");
   const idx = [];
   lines.forEach(function (l, i) {
     if (/^\s/.test(l)) return;
     if (l === key + ":" || l.startsWith(key + ":")) idx.push(i);
   });
-  if (idx.length === 0) return (raw.endsWith("\n") || raw === "") ? raw + block : raw + "\n" + block;
+  if (idx.length === 0) return finish((raw.endsWith("\n") || raw === "") ? raw + block : raw + "\n" + block);
   const out = [];
   let inserted = false;
   for (let i = 0; i < lines.length; i++) {
@@ -779,13 +783,13 @@ function _replaceTopLevelKey(raw, key, block) {
     }
     out.push(lines[i]);
   }
-  return out.join("\n");
+  return finish(out.join("\n"));
 }
 
 // 模块级自动注册：直接操作文件，不依赖 handleFetch 内部函数
 function _moduleParseMcpServers(yml) {
   const out = Object.create(null);
-  const s = String(yml || "");
+  const s = String(yml || "").replace(/\r\n?/g, "\n");
   if ((s.match(/^mcp_servers:[ \t]*/gm) || []).length > 1) return null;
   const inlineTop = s.match(/^mcp_servers:[ \t]*(\{.*\})[ \t]*(?:#.*)?$/m);
   if (inlineTop) {
@@ -802,6 +806,7 @@ function _moduleParseMcpServers(yml) {
   }
   let cur = null;
   let lastKey = null;
+  let nestedKey = null;
   let valid = true;
   const blockLines = block.split("\n");
   blockLines.forEach((l, i) => {
@@ -821,11 +826,33 @@ function _moduleParseMcpServers(yml) {
         if (!flowValue || Array.isArray(flowValue) || typeof flowValue !== "object") { valid = false; return; }
         out[cur] = flowValue;
       } else out[cur] = Object.create(null);
-      lastKey = null; return;
+      lastKey = null; nestedKey = null; return;
+    }
+    if (cur && nestedKey && /^ {8}- /.test(l)) {
+      if (!Array.isArray(out[cur][lastKey][nestedKey])) out[cur][lastKey][nestedKey] = [];
+      const item = decodeMcpScalarOnce(l.slice(10).trim());
+      if (item === undefined) { valid = false; return; }
+      out[cur][lastKey][nestedKey].push(item);
+      return;
+    }
+    if (cur && lastKey && /^ {6}\S/.test(l) && out[cur][lastKey] && typeof out[cur][lastKey] === "object" && !Array.isArray(out[cur][lastKey])) {
+      const body = l.slice(6);
+      const split = _flowColonIndex(body);
+      const key = split > 0 ? decodeMcpScalarOnce(body.slice(0, split)) : "";
+      if (split < 1 || typeof key !== "string" || !key || Object.prototype.hasOwnProperty.call(out[cur][lastKey], key)) { valid = false; return; }
+      let value = body.slice(split + 1).trim();
+      if (/^#/.test(value)) value = "";
+      if (value) {
+        const parsed = _moduleParseFlowValue(value, 0);
+        if (parsed === undefined) { valid = false; return; }
+        out[cur][lastKey][key] = parsed;
+      } else out[cur][lastKey][key] = Object.create(null);
+      nestedKey = key;
+      return;
     }
     // 列表项必须先于标量分支处理：YAML 允许 4 空格或 6 空格缩进的 "- item"
     if (cur && lastKey && /^\s+- /.test(l)) {
-      if (!/^ {6,}- /.test(l) || (!Array.isArray(out[cur][lastKey]) && out[cur][lastKey] !== "")) { valid = false; return; }
+      if (!/^ {6}- /.test(l) || (!Array.isArray(out[cur][lastKey]) && out[cur][lastKey] !== "")) { valid = false; return; }
       if (!Array.isArray(out[cur][lastKey])) out[cur][lastKey] = [];
       const item = decodeMcpScalarOnce(l.replace(/^\s+- /, "").trim());
       if (item === undefined) { valid = false; return; }
@@ -853,7 +880,7 @@ function _moduleParseMcpServers(yml) {
         // 空值字段可能是嵌套 map；若按标量保留，会在回写时丢掉认证头等子项。
         let next = i + 1;
         while (next < blockLines.length && (!blockLines[next].trim() || blockLines[next].trim().startsWith("#"))) next++;
-        const hasNestedMap = value === "" && next < blockLines.length && /^      [^\s-][^:]*:\s*/.test(blockLines[next]);
+        const hasNestedMap = value === "" && next < blockLines.length && /^ {6}[^\s-][^:]*:\s*/.test(blockLines[next]);
         if (hasNestedMap) out[cur][key] = Object.create(null);
         else if (value[0] === "{" || value[0] === "[") {
           const flowValue = _moduleParseFlowValue(value, 0);
@@ -865,6 +892,7 @@ function _moduleParseMcpServers(yml) {
           out[cur][key] = scalar;
         }
         lastKey = key;
+        nestedKey = null;
         return;
       }
     }
@@ -6535,28 +6563,28 @@ async function handleFetch(req) {
   function _setYamlMapBlock(content, key, obj){
     let block;
     const names = Object.keys(obj);
+    function appendMap(value, indent){
+      let text = "";
+      Object.entries(value || {}).forEach(([childKey, childValue]) => {
+        const pad = " ".repeat(indent);
+        if (Array.isArray(childValue)) {
+          text += pad + _yamlScalarSafe(childKey) + ":\n";
+          childValue.forEach(item => { text += " ".repeat(indent + 2) + "- " + _yamlScalarSafe(item) + "\n"; });
+        } else if (childValue && typeof childValue === "object") {
+          text += pad + _yamlScalarSafe(childKey) + ":\n" + appendMap(childValue, indent + 2);
+        } else if (childValue !== undefined && childValue !== null && childValue !== "") {
+          text += pad + _yamlScalarSafe(childKey) + ": " + _yamlScalarSafe(childValue) + "\n";
+        }
+      });
+      return text;
+    }
     if (names.length === 0) {
       block = `${key}: {}`;
     } else {
       block = `${key}:\n`;
       names.forEach(name => {
         block += `  ${_yamlScalarSafe(name)}:\n`;
-        const entry = obj[name] || {};
-        Object.entries(entry).forEach(([k, v]) => {
-          if (Array.isArray(v)){
-            block += `    ${k}:\n` + v.map(x => `      - ${_yamlScalarSafe(x)}`).join("\n") + "\n";
-          } else if (v && typeof v === "object"){
-            // 嵌套 map（env: {KEY: value} 等）：逐键序列化，避免 [object Object]
-            block += `    ${k}:\n`;
-            Object.entries(v).forEach(([k2, v2]) => {
-              if (v2 !== undefined && v2 !== null && v2 !== ""){
-                block += `      ${_yamlScalarSafe(k2)}: ${_yamlScalarSafe(v2)}\n`;
-              }
-            });
-          } else if (v !== undefined && v !== null && v !== ""){
-            block += `    ${k}: ${_yamlScalarSafe(v)}\n`;
-          }
-        });
+        block += appendMap(obj[name], 4);
       });
     }
     return _setTopLevelBlock(content, key, block);
@@ -6602,11 +6630,12 @@ async function handleFetch(req) {
   // 从 config.yaml 提取某个顶层块的原始文本（用于 GET 推断）
   // 兼容 block 形态（key:\n 缩进内容）与 inline 形态（key: {} / key: value）
   function _yamlBlockOf(yml, key){
-    const m = yml.match(new RegExp("^" + key + ":\\n([\\s\\S]*?)(?=^[a-zA-Z_]+:|\\Z)", "m"));
+    yml = String(yml || "").replace(/\r\n?/g, "\n");
+    const m = yml.match(new RegExp("^" + key + ":\\n([\\s\\S]*?)(?=^[a-zA-Z_]+:|(?![\\s\\S]))", "m"));
     if (m) return m[1];
     const im = yml.match(new RegExp("^" + key + ":\\s*\\{[^\\n]*\\}\\s*$", "m"));
     if (im) return "";
-    const iv = yml.match(new RegExp("^" + key + ":\\s*([^\\n]*)\\s*$", "m"));
+    const iv = yml.match(new RegExp("^" + key + ":[ \\t]*([^\\n]*)[ \\t]*$", "m"));
     if (iv) return iv[1] + "\n";
     return "";
   }
@@ -6649,6 +6678,9 @@ async function handleFetch(req) {
     return false;
   }
   function _setTopLevelBlock(content, key, newBlock) {
+    const eol = /\r\n/.test(String(content)) ? "\r\n" : "\n";
+    content = String(content || "").replace(/\r\n?/g, "\n");
+    newBlock = String(newBlock || "").replace(/\r\n?/g, "\n");
     const lines = content.split("\n");
     const out = [];
     let inserted = false;
@@ -6675,7 +6707,8 @@ async function handleFetch(req) {
       out.push(line);
     }
     if (!inserted && !removeOnly) out.push(newBlock); // 无任何现存块：追加到末尾
-    return out.join("\n");
+    const result = out.join("\n");
+    return eol === "\n" ? result : result.replace(/\n/g, eol);
   }
 
   function _expandHome(p){
@@ -6751,23 +6784,32 @@ async function handleFetch(req) {
   // 解析现有 mcp_servers 顶层映射块为 { name: {url, headers:{...}, env:{...}} }
   // 支持嵌套 map（headers/env 子块）与列表（args），自适应子块类型
   function _parseMcpServers(yml){
-    const block = _yamlBlockOf(yml, "mcp_servers");
+    const block = _yamlBlockOf(String(yml || "").replace(/\r\n?/g, "\n"), "mcp_servers");
     const obj = {};
     if (!block.trim()) return obj;
     const lines = block.split("\n");
-    let curName = null, curEntry = null, inMap = null;
-    for (const line of lines){
+    let curName = null, curEntry = null, inMap = null, nestedMap = null;
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++){
+      const line = lines[lineIndex];
       // 顶层条目（2 空格缩进 name:）
       const nm = line.match(/^  ([A-Za-z0-9_-]+):\s*$/);
       if (nm){
         if (curName) obj[curName] = curEntry;
-        curName = nm[1]; curEntry = {}; inMap = null; continue;
+        curName = nm[1]; curEntry = {}; inMap = null; nestedMap = null; continue;
+      }
+      // 8 空格 - item（嵌套 map 中的序列）
+      const nli = line.match(/^        -\s*(.*)$/);
+      if (nli && curEntry && inMap && nestedMap){
+        const list = curEntry[inMap][nestedMap];
+        if (!Array.isArray(list)) curEntry[inMap][nestedMap] = [];
+        curEntry[inMap][nestedMap].push(_yamlUnquote(nli[1].trim()));
+        continue;
       }
       // 4 空格 key:（条目字段；v 为空 → 子块，暂存 null 由后续行确定类型）
       const sk = line.match(/^    ([A-Za-z0-9_-]+):\s*(.*)$/);
       if (sk && curName && curEntry){
         const k = sk[1], v = sk[2].trim();
-        inMap = null;
+        inMap = null; nestedMap = null;
         if (v === ""){ curEntry[k] = null; inMap = k; }
         else { curEntry[k] = v; }
         continue;
@@ -6776,10 +6818,18 @@ async function handleFetch(req) {
       const hk = line.match(/^      ([A-Za-z0-9_-]+):\s*(.*)$/);
       if (hk && curEntry && inMap){
         if (curEntry[inMap] === null || curEntry[inMap] === undefined) curEntry[inMap] = {};
+        if (curEntry[inMap] && typeof curEntry[inMap] === "object" && !Array.isArray(curEntry[inMap])) {
+          const v = hk[2].trim();
+          const nextLine = lines[lineIndex + 1] || "";
+          curEntry[inMap][hk[1]] = v === "" && /^        -\s/.test(nextLine) ? [] : (v === "" ? {} : _yamlUnquote(v));
+          nestedMap = hk[1];
+          continue;
+        }
         else if (Array.isArray(curEntry[inMap])) curEntry[inMap] = {};
         let hv = hk[2].trim();
         if ((hv.startsWith('"') && hv.endsWith('"')) || (hv.startsWith("'") && hv.endsWith("'"))) hv = hv.slice(1, -1);
         curEntry[inMap][hk[1]] = hv;
+        nestedMap = null;
         continue;
       }
       // 6 空格 - item（子列表成员：args 等）
@@ -6790,6 +6840,7 @@ async function handleFetch(req) {
         let val = li[1].trim();
         if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
         curEntry[inMap].push(val);
+        nestedMap = null;
         continue;
       }
     }
