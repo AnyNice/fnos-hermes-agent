@@ -795,22 +795,49 @@ function _moduleParseMcpServers(yml) {
   }
   let cur = null;
   let lastKey = null;
-  block.split("\n").forEach(l => {
+  const blockLines = block.split("\n");
+  blockLines.forEach((l, i) => {
     const km = l.match(/^  ([a-zA-Z0-9_\-]+):\s*$/);
     if (km) { cur = km[1]; out[cur] = {}; lastKey = null; return; }
     // 列表项必须先于标量分支处理：YAML 允许 4 空格或 6 空格缩进的 "- item"
     if (cur && lastKey && /^\s+- /.test(l)) {
       if (!Array.isArray(out[cur][lastKey])) out[cur][lastKey] = [];
-      out[cur][lastKey].push(normalizeCommand(l.replace(/^\s+- /, "").trim()));
+      out[cur][lastKey].push(decodeMcpScalarOnce(l.replace(/^\s+- /, "").trim()));
+      return;
+    }
+    if (cur && lastKey && /^      \S/.test(l) && out[cur][lastKey] && typeof out[cur][lastKey] === "object" && !Array.isArray(out[cur][lastKey])) {
+      const mm = l.match(/^      ([^:]+):\s*(.*)$/);
+      if (mm) out[cur][lastKey][mm[1].trim()] = decodeMcpScalarOnce(mm[2].trim());
       return;
     }
     if (cur && /^    \S/.test(l)) {
       const vm = l.match(/^    (\S+):\s*(.*)$/);
-      if (vm) { out[cur][vm[1]] = vm[2].trim(); lastKey = vm[1]; }
+      if (vm) {
+        const value = vm[2].trim();
+        // 空值字段可能是嵌套 map；若按标量保留，会在回写时丢掉认证头等子项。
+        let next = i + 1;
+        while (next < blockLines.length && !blockLines[next].trim()) next++;
+        const hasNestedMap = value === "" && next < blockLines.length && /^      [^\s-][^:]*:\s*/.test(blockLines[next]);
+        out[cur][vm[1]] = hasNestedMap ? {} : value;
+        lastKey = vm[1];
+      }
       // 注意：这里不再 return —— 无 key 的行留给后续分支判断
     }
   });
   return out;
+}
+function decodeMcpScalarOnce(v) {
+  const s2 = String(v == null ? "" : v).trim();
+  if (s2.length >= 2 && s2[0] === '"' && s2[s2.length - 1] === '"') {
+    try {
+      const decoded = JSON.parse(s2);
+      if (typeof decoded === "string") return decoded;
+    } catch (_) {}
+  }
+  if (s2.length >= 2 && s2[0] === "'" && s2[s2.length - 1] === "'") {
+    return s2.slice(1, -1).replace(/''/g, "'");
+  }
+  return s2;
 }
 // 归一化 command 值：有界地解开多层 JSON 引号（历史污染可能是多层）。
 // 修复：url-only MCP 被写入 command: "" 后，每轮回写再 stringify 一次，
@@ -876,7 +903,12 @@ function _moduleLevelAutoRegisterMcp() {
         if (args.length) out += "    args:\n" + args.map(a => "      - " + JSON.stringify(a)).join("\n") + "\n";
         Object.keys(e).forEach(k2 => {
           if (k2 === "command" || k2 === "args" || k2 === "command_cmd") return;
-          out += "    " + k2 + ": " + e[k2] + "\n";
+          const value = e[k2];
+          if (value && typeof value === "object" && !Array.isArray(value)) {
+            out += "    " + k2 + ":\n" + Object.keys(value).map(k3 => "      " + k3 + ": " + JSON.stringify(value[k3])).join("\n") + "\n";
+          } else {
+            out += "    " + k2 + ": " + value + "\n";
+          }
         });
         return out.replace(/\n$/, "");
       }).join("\n");
