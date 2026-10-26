@@ -786,6 +786,12 @@ function _replaceTopLevelKey(raw, key, block) {
 function _moduleParseMcpServers(yml) {
   const out = {};
   const s = String(yml || "");
+  const inlineTop = s.match(/^mcp_servers:[ \t]*(\{.*\})[ \t]*(?:#.*)?$/m);
+  if (inlineTop) {
+    const parsed = _moduleParseFlowMap(inlineTop[1], 0);
+    if (!parsed || Object.keys(parsed).some(k => !parsed[k] || Array.isArray(parsed[k]) || typeof parsed[k] !== "object")) return {};
+    return parsed;
+  }
   let block = "";
   const mTop = s.match(/^mcp_servers:\s*\n([\s\S]*?)(?=^[a-zA-Z_][a-zA-Z0-9_-]*:)/m);
   if (mTop) block = mTop[1];
@@ -824,6 +830,63 @@ function _moduleParseMcpServers(yml) {
       // 注意：这里不再 return —— 无 key 的行留给后续分支判断
     }
   });
+  return out;
+}
+// Inline YAML 的 flow 语法只接受本模块能无损回写的单行子集；无法确认边界时交给写入护栏拒绝。
+function _moduleParseFlowMap(text, depth) {
+  const s = String(text || "").trim();
+  if (depth > 2 || s[0] !== "{" || s[s.length - 1] !== "}") return null;
+  const body = s.slice(1, -1).trim();
+  if (!body) return {};
+  const parts = [];
+  let start = 0, braces = 0, brackets = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "{") braces++;
+    else if (ch === "}") { if (braces === 0) return null; braces--; }
+    else if (ch === "[") brackets++;
+    else if (ch === "]") { if (brackets === 0) return null; brackets--; }
+    else if (ch === "," && braces === 0 && brackets === 0) { parts.push(body.slice(start, i).trim()); start = i + 1; }
+  }
+  if (braces || brackets) return null;
+  parts.push(body.slice(start).trim());
+  const out = {};
+  for (const part of parts) {
+    if (!part) return null;
+    let split = -1, nested = 0, array = 0;
+    for (let i = 0; i < part.length; i++) {
+      const ch = part[i];
+      if (ch === "{") nested++;
+      else if (ch === "}") nested--;
+      else if (ch === "[") array++;
+      else if (ch === "]") array--;
+      else if (ch === ":" && nested === 0 && array === 0) { split = i; break; }
+    }
+    if (split < 1) return null;
+    const key = part.slice(0, split).trim();
+    const rawValue = part.slice(split + 1).trim();
+    if (!/^[a-zA-Z0-9_-]+$/.test(key) || !rawValue || Object.prototype.hasOwnProperty.call(out, key)) return null;
+    if (rawValue[0] === "{") {
+      const value = _moduleParseFlowMap(rawValue, depth + 1);
+      if (!value) return null;
+      out[key] = value;
+    } else if (rawValue[0] === "[") {
+      if (rawValue[rawValue.length - 1] !== "]") return null;
+      const values = rawValue.slice(1, -1).trim();
+      let quote = "", escaped = false;
+      for (const ch of values) {
+        if (escaped) { escaped = false; continue; }
+        if (ch === "\\" && quote === '"') { escaped = true; continue; }
+        if (quote) { if (ch === quote) quote = ""; else if (ch === ",") return null; }
+        else if (ch === '"' || ch === "'") quote = ch;
+      }
+      if (quote || escaped) return null;
+      out[key] = values ? values.split(",").map(v => v.trim()).map(v => decodeMcpScalarOnce(v)) : [];
+    } else {
+      if (/[{}\[\]]/.test(rawValue)) return null;
+      out[key] = decodeMcpScalarOnce(rawValue);
+    }
+  }
   return out;
 }
 function decodeMcpScalarOnce(v) {
@@ -882,6 +945,14 @@ function _moduleLevelAutoRegisterMcp() {
     });
     // 合并：保留现有非 conn-* 的 MCP 服务器（用户手动配置不被覆盖），conn-* 按凭证补齐
     const merged = _moduleParseMcpServers(yml);
+    const inlineSource = yml.match(/^mcp_servers:[ \t]*(.*)$/m);
+    const inlineValue = inlineSource ? inlineSource[1].replace(/[ \t]+#.*$/, "").trim() : "";
+    const hasInlineContent = !!inlineValue && inlineValue !== "{}";
+    const blockContent = _mcpBlockLen(yml) > 0;
+    if (Object.keys(merged).length === 0 && (hasInlineContent || blockContent)) {
+      log("[MCP-BRIDGE] refuse to write: existing mcp_servers could not be parsed");
+      return;
+    }
     Object.keys(connObj).forEach(k => { merged[k] = connObj[k]; });
     // 清理已无凭证的 conn-*（防止残留失效配置）
     Object.keys(merged).forEach(k => {
