@@ -591,26 +591,19 @@ else
     log_msg 'init.sh 不存在'
 fi
 
-# —— sudoers 授权：hermes-agent 免密 cp/chown/psql（版本同步/覆盖/权限修复必需）——
-# monitor（hermes-agent 用户）需要 sudo -n cp/chown 覆盖应用文件 + sudo -u postgres psql 同步应用中心版本；
+# —— sudoers 授权：应用用户免密 cp/chown/psql（版本同步/覆盖/权限修复必需）——
+# monitor（应用用户）需要 sudo -n cp/chown 覆盖应用文件 + sudo -u postgres psql 同步应用中心版本；
 # 未配置时 auto-update 覆盖后应用中心版本不刷新（显示旧版本）。
+# 三条写入路径（root 直写 / sudo 代写 / 降级暂存 pending+修复指引），实现与幂等判定
+# 在 config/bootstrap/sudoers-grant.sh；CLI 安装以应用用户跑回调时不再静默失败。
 if [ -n "${TRIM_USERNAME:-}" ]; then
-    _SUDOERS_FILE="/etc/sudoers.d/hermes-appcenter"
-    # 旧版 sudoers 可能只有 cp/psql（缺 chown）→ 内容不完整必须重写（含 chown 才算完整）
-    if [ ! -f "${_SUDOERS_FILE}" ] || ! grep -q 'chown' "${_SUDOERS_FILE}" 2>/dev/null; then
-        log_msg ">>> 写入 sudoers 授权（${_SUDOERS_FILE}）..."
-        printf 'hermes-agent ALL=(root) NOPASSWD: /bin/cp, /usr/bin/cp, /bin/chown, /usr/bin/chown, /usr/bin/sudo -u postgres /usr/bin/psql -d appcenter *\n' > /tmp/hermes-appcenter-sudoers
-        chmod 440 /tmp/hermes-appcenter-sudoers
-        if cp /tmp/hermes-appcenter-sudoers "${_SUDOERS_FILE}" 2>>"${TRIM_PKGVAR}/info.log"; then
-            chmod 440 "${_SUDOERS_FILE}" 2>/dev/null || true
-            log_msg "sudoers 写入成功"
-        else
-            log_msg "sudoers 写入失败（请手动配置 /etc/sudoers.d/hermes-appcenter）"
-        fi
-        rm -f /tmp/hermes-appcenter-sudoers
-    else
-        log_msg "sudoers 已存在且完整，跳过"
+    if [ ! -f "${APP_DIR}/config/bootstrap/sudoers-grant.sh" ]; then
+        toast_err "sudoers-grant.sh 不存在，请检查打包是否包含 config/bootstrap/"
+        exit 1
     fi
+    # shellcheck disable=SC1090
+    . "${APP_DIR}/config/bootstrap/sudoers-grant.sh"
+    install_sudoers_grant
 fi
 
 trap - ERR
