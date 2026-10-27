@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import uuid
 
@@ -116,6 +117,9 @@ def main() -> int:
         parser.error("Provide --fnpack /path/to/fnpack (https://developer.fnnas.com/docs/cli/fnpack/)")
     fnpack = Path(args.fnpack).resolve()
     version = validate()
+    # Keep the gitignored vendored core in sync with the tracked core fixes
+    # (patches/core/*.patch) before staging the package tree.
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "apply-core-patches.py")], check=True)
     job = ROOT / ".build" / f"fpk-{uuid.uuid4().hex}"
     stage = job / "hermes-agent"
     stage.mkdir(parents=True)

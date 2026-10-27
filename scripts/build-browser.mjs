@@ -65,7 +65,8 @@ export default async (env: any) => mergeConfig(await upstream(env), {
   }, generateBundle() {
     const bridge = readFileSync(fileURLToPath(new URL('./fnos-browser/bridge.js', import.meta.url)), 'utf8')
     this.emitFile({ type: 'asset', fileName: 'fnos-host.js', source: bridge.replaceAll('export function', 'function') +
-      '\\nwindow.hermesDesktop = createBrowserBridge({ hostRoot: new URL("../", new URL("./", window.location.href)) });\\n' })
+      '\\nwindow.hermesDesktop = createBrowserBridge({ hostRoot: new URL("../", new URL("./", window.location.href)) });\\n' +
+      '\\ntry { window.localStorage.setItem("hermes-onboarding-skipped-v1","1"); } catch(e) {}\\n' })
   }}],
   build: { outDir: ${JSON.stringify(path.join(root, 'app/work-ui'))}, emptyOutDir: true, reportCompressedSize: false },
 })
