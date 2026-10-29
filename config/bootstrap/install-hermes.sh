@@ -103,6 +103,36 @@ install_hermes_from_source() {
         log_msg "ERROR: bundled hermes-src is missing; rebuild the FPK with the pinned source"
         return 1
     fi
+
+    # 方案 0（0.22.5+ 必需）：走随包 uv.lock 的锁化安装。
+    # 官方 0.22.5 起 pillow==13.0.0（安全通告驱动）与 browser-harness==0.1.13
+    # 自身的 pillow==12.3.0 硬冲突；bare `uv pip install` 解析直接失败。
+    # 冲突通过 [tool.uv] overrides 记录在 uv.lock 里，只有锁化安装
+    # （uv sync --frozen）能带着 override 通过。旧核心（无此冲突）走下面兜底。
+    if [ -f "${HERMES_SRC}/uv.lock" ]; then
+        local index
+        for index in \
+            https://pypi.tuna.tsinghua.edu.cn/simple \
+            https://mirrors.aliyun.com/pypi/simple/ \
+            https://pypi.org/simple
+        do
+            log_msg "Syncing bundled Hermes [all,voice] from lock (index: ${index}) ..."
+            if UV_INDEX_URL="${index}" VIRTUAL_ENV="${VENV_DIR}" \
+                    "$UV" sync --active --frozen \
+                    --project "${HERMES_SRC}" \
+                    --extra all --extra voice >>"${LOG_FILE}" 2>&1; then
+                if timeout 30 "${HERMES}" --version >>"${LOG_FILE}" 2>&1; then
+                    mkdir -p "${VAR_DIR}"
+                    hermes_source_id > "${VAR_DIR}/hermes-install.id"
+                    log_msg "Hermes [all,voice] synced OK from lock (index: ${index})"
+                    return 0
+                fi
+            fi
+            log_msg "Lock sync failed on ${index}, trying next"
+        done
+    fi
+
+    # 方案 1（兜底）：依赖安装，国内源优先（清华 → 阿里云 → pypi.org 兜底）
     local index
     for index in \
         https://pypi.tuna.tsinghua.edu.cn/simple \
