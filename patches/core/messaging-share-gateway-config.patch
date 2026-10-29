@@ -1,11 +1,6 @@
 --- a/app/hermes-src/hermes_cli/web_routers/messaging.py
 +++ b/app/hermes-src/hermes_cli/web_routers/messaging.py
-@@ -165,16 +165,42 @@
- 
- def _require_platform(platform_id: str) -> dict[str, Any]:
-     entry = _catalog_lookup(platform_id)
-     if not entry:
-         raise HTTPException(status_code=404, detail=f"Unknown messaging platform: {platform_id}")
+@@ -156,6 +156,32 @@
      return entry
  
  
@@ -38,17 +33,7 @@
  def _platform_enablement(
      platform_id: str, entry: dict[str, Any], env_on_disk: dict[str, str], scoped: bool
  ) -> tuple[bool, bool, dict | None]:
-     """(enabled, configured, home_channel). Profile-scoped: derive from the profile's
-     config.yaml + .env only — load_gateway_config()'s env-override layer reads
-     os.environ and would leak the root install's tokens into the profile's state."""
-     required = entry["required_env"]
-     if scoped:
-@@ -186,19 +212,19 @@
-             # Setup writes credentials without a platforms entry; explicit disable wins.
-             raw_enabled = plat_cfg.get("enabled")
-             enabled = False if raw_enabled is False else bool(raw_enabled) or configured
-             home_channel = hc if isinstance(hc, dict) else None
-         except Exception:
+@@ -177,9 +203,9 @@
              enabled, home_channel = False, None
          return enabled, configured, home_channel
      try:
@@ -60,8 +45,3 @@
          platform = Platform(platform_id)
          platform_config = gateway_config.platforms.get(platform)
          enabled = bool(platform_config and platform_config.enabled)
-         configured = bool(platform_config and gateway_config._is_platform_connected(platform, platform_config))
-         home_channel = platform_config.home_channel.to_dict() if platform_config and platform_config.home_channel else None
-     except Exception:
-         enabled, home_channel = False, None
-         configured = all(env_on_disk.get(key) or os.getenv(key, "") for key in required)
